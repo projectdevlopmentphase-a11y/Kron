@@ -102,6 +102,83 @@ def backtest_day_walk_forward(df: pd.DataFrame, target_date, lookback_days: int,
     return prior_context, actual, pred_df
 
 
+SESSION_HOURS = [9, 10, 11, 12, 13, 14, 15]  # bar timestamps land on HH:15
+
+
+def next_intraday_slots(last_timestamp: pd.Timestamp, pred_len: int) -> pd.Series:
+    """Generate the next `pred_len` hourly-bar timestamps after last_timestamp,
+    continuing the same trading day if it isn't finished yet (last bar before
+    15:15), otherwise starting at 09:15 on the next business day. Does not know
+    about exchange holidays, same limitation as forecast.py's future mode.
+    """
+    day = last_timestamp.normalize()
+    hour = last_timestamp.hour
+    if hour in SESSION_HOURS and hour < SESSION_HOURS[-1]:
+        idx = SESSION_HOURS.index(hour) + 1
+    else:
+        day = day + pd.tseries.offsets.BDay(1)
+        idx = 0
+
+    slots = []
+    while len(slots) < pred_len:
+        if idx >= len(SESSION_HOURS):
+            day = day + pd.tseries.offsets.BDay(1)
+            idx = 0
+        slots.append(day + pd.Timedelta(hours=SESSION_HOURS[idx], minutes=15))
+        idx += 1
+    return pd.Series(slots)
+
+
+def predict_next_bars(df: pd.DataFrame, lookback_days: int, pred_len: int, predictor, T, top_p, sample_count):
+    """Live-style forecast: no held-out actuals required. Uses the last
+    `lookback_days` trading days present in df (including a still-in-progress
+    day, if the CSV's most recent data is mid-session) as context, and predicts
+    the next `pred_len` hourly bars from there.
+    """
+    dates = trading_dates(df)
+    context_dates = dates[-lookback_days:]
+    context = df[df["timestamps"].dt.normalize().isin(context_dates)]
+    last_timestamp = context["timestamps"].iloc[-1]
+    y_timestamp = next_intraday_slots(last_timestamp, pred_len)
+    pred = predictor.predict(
+        df=context[PRICE_COLS],
+        x_timestamp=context["timestamps"],
+        y_timestamp=y_timestamp,
+        pred_len=pred_len,
+        T=T,
+        top_p=top_p,
+        sample_count=sample_count,
+        verbose=True,
+    )
+    pred.index = y_timestamp.values
+    return context, pred
+
+
+def plot_next_bars(context, pred, symbol, chart_output):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(11, 6))
+    tail = context.tail(35)  # last ~5 trading days at 7 bars/day
+    ax.plot(tail["timestamps"], tail["close"], color="#1f77b4", marker="o", markersize=3, label="Context (known)")
+
+    connector_x = [context["timestamps"].iloc[-1]] + list(pred.index)
+    connector_y = [context["close"].iloc[-1]] + list(pred["close"])
+    ax.plot(connector_x, connector_y, color="#d62728", linestyle="--", marker="^", markersize=5, label="Kronos forecast")
+
+    ax.axvline(context["timestamps"].iloc[-1], color="gray", linestyle=":", linewidth=1)
+    ax.set_title(f"{symbol} — next {len(pred)} hourly bar(s) from {context['timestamps'].iloc[-1]}")
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Price")
+    ax.legend()
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    fig.savefig(chart_output, dpi=150)
+    plt.close(fig)
+
+
 def compute_metrics(actual, pred, column="close"):
     errors = pred[column].to_numpy() - actual[column].to_numpy()
     mae = abs(errors).mean()
@@ -159,10 +236,39 @@ def main():
         "outcome back in as context before predicting the next bar, instead of "
         "generating the whole day in one shot from only the prior days' context",
     )
+    parser.add_argument(
+        "--predict-next",
+        type=int,
+        help="live mode (no backtest): predict this many hourly bars forward from "
+        "the end of --csv, instead of scoring against known history. Re-run this "
+        "with --predict-next 1 after each new real bar lands to get a walk-forward "
+        "style live forecast",
+    )
     args = parser.parse_args()
 
     df = load_intraday(args.csv)
     symbol = Path(args.csv).stem
+
+    if args.predict_next:
+        print(f"Loading {MODEL_NAME} / {TOKENIZER_NAME} ...")
+        tokenizer = KronosTokenizer.from_pretrained(TOKENIZER_NAME)
+        model = Kronos.from_pretrained(MODEL_NAME)
+        predictor = KronosPredictor(model, tokenizer, max_context=512)
+
+        context, pred = predict_next_bars(
+            df, args.lookback_days, args.predict_next, predictor, args.temperature, args.top_p, args.sample_count
+        )
+        print(f"\nLast known bar: {context['timestamps'].iloc[-1]} close={context['close'].iloc[-1]:.2f}")
+        print("\nForecast:")
+        print(pred)
+
+        if args.output:
+            pred.to_csv(args.output)
+            print(f"Wrote forecast to {args.output}")
+        if args.chart_output:
+            plot_next_bars(context, pred, symbol, args.chart_output)
+            print(f"Wrote chart to {args.chart_output}")
+        return
 
     all_dates = trading_dates(df)
     if args.before:

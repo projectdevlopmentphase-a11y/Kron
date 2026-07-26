@@ -190,6 +190,36 @@ the daily case: Kronos can't predict a surprise before it happens, but it
 adapts to new real information almost immediately once it's given that
 information, rather than compounding its own earlier miss.
 
+### Live intraday use
+
+`--backtest`/`--walk-forward` only work retroactively — they need a target
+day's real outcome already in the CSV to score against. For live use, pass
+`--predict-next N` instead: it takes whatever real candles are already in
+your CSV, uses the last `--lookback-days` trading days as context, and
+predicts the next `N` hourly bars from there — no held-out actuals needed.
+It correctly continues the *same* trading day if the CSV's last bar isn't
+15:15 yet (a session in progress), or rolls to 09:15 the next business day
+if it is:
+
+```shell
+python -m nse.intraday_backtest --csv data/NSE_HDFCBANK_60min_range.csv \
+    --lookback-days 5 --predict-next 1 \
+    --output data/NSE_HDFCBANK_next_hour.csv \
+    --chart-output data/NSE_HDFCBANK_next_hour.png
+```
+
+The practical live workflow, matching how `--walk-forward` behaves in the
+backtest: pull fresh 60-minute candles (e.g. via `nse/kite_client.py` or a
+live Kite session), append the newly-closed real bar to your CSV, then
+re-run `--predict-next 1` to get a forecast for the *next* hour only. Repeat
+after every hour closes throughout the session — each run picks up the real
+bar you just appended as part of its context, which is exactly the
+feed-the-real-bar-back-in mechanism `--walk-forward` simulates in
+backtesting, just done live one hour at a time instead of replayed over
+history. Asking for `--predict-next` with N > 1 in one shot reverts to the
+single-shot behavior (no correction until you actually re-run it with new
+data), so for live trading prefer N=1 and re-run every hour.
+
 ## Notes
 
 Model weights (`NeoQuasar/Kronos-small`, `NeoQuasar/Kronos-Tokenizer-base`) are
