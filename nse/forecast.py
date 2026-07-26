@@ -109,6 +109,37 @@ def plot_forecast(history_df, pred_df, symbol, chart_output, events=None):
     plt.close(fig)
 
 
+def walk_forward_backtest(df, lookback, pred_len, predictor, T, top_p, sample_count):
+    """Re-forecast one day at a time, feeding each day's *actual* outcome back in
+    as context before predicting the next day (a realistic "re-run every morning
+    with last night's real close" simulation), instead of one static multi-day
+    forecast made from a single stale context window.
+    """
+    n = len(df)
+    start = n - pred_len
+    price_cols = ["open", "high", "low", "close", "volume", "amount"]
+    rows = []
+    for i in range(pred_len):
+        idx = start + i
+        context = df.iloc[idx - lookback : idx]
+        target_timestamp = df.iloc[idx]["timestamps"]
+        y_timestamp = pd.Series([target_timestamp])
+        pred = predictor.predict(
+            df=context[price_cols],
+            x_timestamp=context["timestamps"],
+            y_timestamp=y_timestamp,
+            pred_len=1,
+            T=T,
+            top_p=top_p,
+            sample_count=sample_count,
+            verbose=False,
+        )
+        pred.index = y_timestamp.values
+        rows.append(pred)
+        print(f"  walk-forward {target_timestamp.date()}: predicted close={pred['close'].iloc[0]:.2f}")
+    return pd.concat(rows)
+
+
 def compute_metrics(actual_df, pred_df, column="close"):
     actual = actual_df[column].to_numpy()
     predicted = pred_df[column].to_numpy()
@@ -119,7 +150,7 @@ def compute_metrics(actual_df, pred_df, column="close"):
     return {"MAE": mae, "RMSE": rmse, "MAPE_pct": mape}
 
 
-def plot_backtest(context_df, actual_df, pred_df, symbol, chart_output, events=None):
+def plot_backtest(context_df, actual_df, pred_df, symbol, chart_output, events=None, walk_forward_df=None):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -135,7 +166,12 @@ def plot_backtest(context_df, actual_df, pred_df, symbol, chart_output, events=N
 
     pred_connector_x = [context_df["timestamps"].iloc[-1]] + list(pred_df.index)
     pred_connector_y = [context_df["close"].iloc[-1]] + list(pred_df["close"])
-    ax.plot(pred_connector_x, pred_connector_y, label="Kronos forecast", color="#d62728", linestyle="--", marker="o", markersize=4)
+    ax.plot(pred_connector_x, pred_connector_y, label="Static forecast (stale context)" if walk_forward_df is not None else "Kronos forecast", color="#d62728", linestyle="--", marker="o", markersize=4)
+
+    if walk_forward_df is not None:
+        wf_connector_x = [context_df["timestamps"].iloc[-1]] + list(walk_forward_df.index)
+        wf_connector_y = [context_df["close"].iloc[-1]] + list(walk_forward_df["close"])
+        ax.plot(wf_connector_x, wf_connector_y, label="Walk-forward forecast (fed actuals daily)", color="#ff7f0e", linestyle="--", marker="s", markersize=4)
 
     ax.axvline(context_df["timestamps"].iloc[-1], color="gray", linestyle=":", linewidth=1)
     if events:
@@ -177,6 +213,13 @@ def main():
         action="append",
         help="mark a real-world event (e.g. an earnings date) on the chart as "
         "YYYY-MM-DD:label; repeatable",
+    )
+    parser.add_argument(
+        "--walk-forward",
+        action="store_true",
+        help="only with --backtest: also re-forecast one day at a time, feeding each "
+        "day's actual outcome back in as context before predicting the next day, "
+        "and compare against the static multi-day forecast",
     )
     args = parser.parse_args()
     events = parse_events(args.event)
@@ -262,12 +305,38 @@ def main():
                     f"MAE after={after['error'].abs().mean():.2f} ({len(after)} sessions)"
                 )
 
+        walk_forward_df = None
+        if args.walk_forward:
+            print(f"\nWalk-forward: re-forecasting {pred_len} days one at a time, feeding real actuals back in each step ...")
+            walk_forward_df = walk_forward_backtest(
+                df, lookback, pred_len, predictor, args.temperature, args.top_p, args.sample_count
+            )
+            wf_metrics = compute_metrics(actual_df, walk_forward_df, column="close")
+            comparison["walk_forward_close"] = walk_forward_df["close"].values
+            comparison["walk_forward_error"] = walk_forward_df["close"].values - actual_df["close"].values
+            print("\nActual vs static vs walk-forward (close):")
+            print(comparison)
+            print(
+                f"\nWalk-forward close-price accuracy over {pred_len} sessions: "
+                f"MAE={wf_metrics['MAE']:.2f}  RMSE={wf_metrics['RMSE']:.2f}  MAPE={wf_metrics['MAPE_pct']:.2f}%"
+                f"  (static was MAE={metrics['MAE']:.2f})"
+            )
+            for event_date, label in events:
+                before = comparison[comparison.index < event_date]
+                after = comparison[comparison.index >= event_date]
+                if len(before) and len(after):
+                    print(
+                        f"Walk-forward around event '{label}' ({event_date.date()}): "
+                        f"MAE before={before['walk_forward_error'].abs().mean():.2f}, "
+                        f"MAE after={after['walk_forward_error'].abs().mean():.2f}"
+                    )
+
         if args.output:
             comparison.to_csv(args.output)
             print(f"\nWrote backtest comparison to {args.output}")
 
         if args.chart_output:
-            plot_backtest(context_df, actual_df, pred_df, symbol, args.chart_output, events=events)
+            plot_backtest(context_df, actual_df, pred_df, symbol, args.chart_output, events=events, walk_forward_df=walk_forward_df)
             print(f"Wrote chart to {args.chart_output}")
     else:
         if args.output:

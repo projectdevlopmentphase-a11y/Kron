@@ -59,6 +59,18 @@ error on those sessions roughly quadruples. Kronos is a pure price-based
 model with no fundamentals/news input, so it has no way to anticipate
 discrete earnings surprises.
 
+Add `--walk-forward` to also re-forecast one day at a time, feeding each
+day's *actual* close back in as context before predicting the next day
+(e.g. once Monday 2026-07-20's real post-earnings candle is known, does
+Kronos's forecast for Tuesday 2026-07-21 improve over the static 20-day-old
+forecast?):
+
+```shell
+python -m nse.forecast --csv data/NSE_HDFCBANK_day.csv --lookback 400 --pred-len 20 \
+    --backtest --walk-forward --event "2026-07-18:Q1 FY27 results" \
+    --output data/NSE_HDFCBANK_backtest.csv --chart-output data/NSE_HDFCBANK_backtest.png
+```
+
 ## Notes
 
 Model weights (`NeoQuasar/Kronos-small`, `NeoQuasar/Kronos-Tokenizer-base`) are
