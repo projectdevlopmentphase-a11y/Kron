@@ -114,6 +114,27 @@ still one earnings week on one symbol, not a validated result, but it
 suggests Kronos wants a single consistent candle interval throughout its
 context rather than a blend.
 
+More lookback isn't automatically better, though. Doubling to
+`--intraday-lookback 800` (~8 months of hourly candles, back to
+2025-12-01) made things drastically *worse*:
+
+| Context | MAE | RMSE | MAPE |
+|---|---|---|---|
+| 400-bar intraday context (~57 trading days) | **8.79** | **12.22** | **1.10%** |
+| 800-bar intraday context (~114 trading days) | 72.00 | 83.49 | 9.07% |
+
+See `data/NSE_HDFCBANK_backtest_400_vs_800.png`. The 800-bar window reaches
+back to 2026-01-06, when HDFCBANK was still trading around ₹950-960 —
+noticeably higher than the ~₹795-800 it had settled to by late June. That
+window's mean close is ~₹832, pulled up by the stale January price level.
+`KronosPredictor.predict` normalizes its input by the mean/std of the
+*whole* context, so that older, higher-priced regime biased every forecast
+upward for most of the backtest (predictions consistently 50-150 points
+above actual). The lesson: lookback should span enough history to be
+informative, but not so much that it drags in a price regime the stock has
+since moved away from — more context only helps as long as it's still
+representative of current price level and volatility.
+
 ## Notes
 
 Model weights (`NeoQuasar/Kronos-small`, `NeoQuasar/Kronos-Tokenizer-base`) are
