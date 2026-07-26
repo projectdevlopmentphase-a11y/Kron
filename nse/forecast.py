@@ -59,7 +59,31 @@ def future_business_days(last_timestamp: pd.Timestamp, pred_len: int) -> pd.Seri
     return pd.Series(dates)
 
 
-def plot_forecast(history_df, pred_df, symbol, chart_output):
+def parse_events(raw_events):
+    events = []
+    for raw in raw_events or []:
+        date_str, _, label = raw.partition(":")
+        events.append((pd.Timestamp(date_str), label or date_str))
+    return events
+
+
+def annotate_events(ax, events):
+    for i, (event_date, label) in enumerate(events):
+        ax.axvline(event_date, color="#9467bd", linestyle="-.", linewidth=1.5, zorder=0)
+        ax.annotate(
+            label,
+            xy=(event_date, 1),
+            xycoords=("data", "axes fraction"),
+            xytext=(4, -10 - 12 * (i % 3)),
+            textcoords="offset points",
+            fontsize=8,
+            color="#9467bd",
+            rotation=90,
+            va="top",
+        )
+
+
+def plot_forecast(history_df, pred_df, symbol, chart_output, events=None):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -73,6 +97,8 @@ def plot_forecast(history_df, pred_df, symbol, chart_output):
     ax.plot(connector_x, connector_y, label="Kronos forecast", color="#d62728", linestyle="--", marker="o", markersize=3)
 
     ax.axvline(history_df["timestamps"].iloc[-1], color="gray", linestyle=":", linewidth=1)
+    if events:
+        annotate_events(ax, events)
     ax.set_title(f"{symbol} — close price, historical vs Kronos forecast")
     ax.set_xlabel("Date")
     ax.set_ylabel("Price")
@@ -93,7 +119,7 @@ def compute_metrics(actual_df, pred_df, column="close"):
     return {"MAE": mae, "RMSE": rmse, "MAPE_pct": mape}
 
 
-def plot_backtest(context_df, actual_df, pred_df, symbol, chart_output):
+def plot_backtest(context_df, actual_df, pred_df, symbol, chart_output, events=None):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -112,6 +138,8 @@ def plot_backtest(context_df, actual_df, pred_df, symbol, chart_output):
     ax.plot(pred_connector_x, pred_connector_y, label="Kronos forecast", color="#d62728", linestyle="--", marker="o", markersize=4)
 
     ax.axvline(context_df["timestamps"].iloc[-1], color="gray", linestyle=":", linewidth=1)
+    if events:
+        annotate_events(ax, events)
     ax.set_title(f"{symbol} — backtest: Kronos forecast vs actual close")
     ax.set_xlabel("Date")
     ax.set_ylabel("Price")
@@ -144,7 +172,14 @@ def main():
         "lookback candles before them, and score the forecast against what actually "
         "happened, instead of forecasting real future dates (the default)",
     )
+    parser.add_argument(
+        "--event",
+        action="append",
+        help="mark a real-world event (e.g. an earnings date) on the chart as "
+        "YYYY-MM-DD:label; repeatable",
+    )
     args = parser.parse_args()
+    events = parse_events(args.event)
 
     if not args.csv and not args.symbol:
         parser.error("either --csv or --symbol is required")
@@ -217,12 +252,22 @@ def main():
             f"MAE={metrics['MAE']:.2f}  RMSE={metrics['RMSE']:.2f}  MAPE={metrics['MAPE_pct']:.2f}%"
         )
 
+        for event_date, label in events:
+            before = comparison[comparison.index < event_date]
+            after = comparison[comparison.index >= event_date]
+            if len(before) and len(after):
+                print(
+                    f"\nAround event '{label}' ({event_date.date()}): "
+                    f"MAE before={before['error'].abs().mean():.2f} ({len(before)} sessions), "
+                    f"MAE after={after['error'].abs().mean():.2f} ({len(after)} sessions)"
+                )
+
         if args.output:
             comparison.to_csv(args.output)
             print(f"\nWrote backtest comparison to {args.output}")
 
         if args.chart_output:
-            plot_backtest(context_df, actual_df, pred_df, symbol, args.chart_output)
+            plot_backtest(context_df, actual_df, pred_df, symbol, args.chart_output, events=events)
             print(f"Wrote chart to {args.chart_output}")
     else:
         if args.output:
@@ -230,7 +275,7 @@ def main():
             print(f"\nWrote forecast to {args.output}")
 
         if args.chart_output:
-            plot_forecast(history_df, pred_df, symbol, args.chart_output)
+            plot_forecast(history_df, pred_df, symbol, args.chart_output, events=events)
             print(f"Wrote chart to {args.chart_output}")
 
 
