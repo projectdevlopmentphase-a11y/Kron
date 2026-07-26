@@ -116,10 +116,13 @@ def plot_forecast(history_df, pred_df, symbol, chart_output, events=None):
     plt.close(fig)
 
 
-def walk_forward_backtest(df, lookback, pred_len, predictor, T, top_p, sample_count):
+def walk_forward_backtest(df, lookback, pred_len, predictor, T, top_p, sample_count, intraday_df=None, intraday_tail=0):
     """Re-forecast one day at a time, feeding each day's *actual* outcome back in
     as context before predicting the next day (a realistic "re-run every morning
-    with last night's real close" simulation).
+    with last night's real close" simulation). If intraday_df is given, the last
+    `intraday_tail` intraday candles of the prior trading day replace that day's
+    single daily bar as the most recent context (same idea as --append-csv, but
+    repeated at every backtest step).
     """
     n = len(df)
     start = n - pred_len
@@ -127,6 +130,12 @@ def walk_forward_backtest(df, lookback, pred_len, predictor, T, top_p, sample_co
     for i in range(pred_len):
         idx = start + i
         context = df.iloc[idx - lookback : idx]
+        day_intraday = pd.DataFrame()
+        if intraday_df is not None and intraday_tail > 0:
+            prev_day = df.iloc[idx - 1]["timestamps"].normalize()
+            day_intraday = intraday_df[intraday_df["timestamps"].dt.normalize() == prev_day].tail(intraday_tail)
+            if len(day_intraday):
+                context = pd.concat([context.iloc[len(day_intraday):], day_intraday], ignore_index=True)
         target_timestamp = df.iloc[idx]["timestamps"]
         y_timestamp = pd.Series([target_timestamp])
         pred = predictor.predict(
@@ -141,7 +150,8 @@ def walk_forward_backtest(df, lookback, pred_len, predictor, T, top_p, sample_co
         )
         pred.index = y_timestamp.values
         rows.append(pred)
-        print(f"  {target_timestamp.date()}: predicted close={pred['close'].iloc[0]:.2f}")
+        tag = " (+intraday)" if len(day_intraday) else ""
+        print(f"  {target_timestamp.date()}: predicted close={pred['close'].iloc[0]:.2f}{tag}")
     return pd.concat(rows)
 
 
@@ -216,9 +226,12 @@ def main():
     )
     parser.add_argument(
         "--append-csv",
-        help="only with --future: path to a finer-grained OHLCV CSV (e.g. intraday "
-        "60minute candles) whose most recent --append-tail rows are appended after "
-        "the daily lookback tail, as the most recent context, before forecasting",
+        help="path to a finer-grained OHLCV CSV (e.g. intraday 60minute candles) "
+        "whose most recent --append-tail rows are appended as the most recent "
+        "context. In --future mode this is done once, after the daily lookback "
+        "tail; in --backtest mode it's done at every walk-forward step, replacing "
+        "each held-out day's single daily bar with that prior day's own intraday "
+        "candles (matched by date)",
     )
     parser.add_argument(
         "--append-tail",
@@ -254,8 +267,17 @@ def main():
         actual_df = window.iloc[lookback:].reset_index(drop=True)
         y_timestamp = actual_df["timestamps"]
 
+        intraday_df = None
+        if args.append_csv:
+            intraday_df = pd.read_csv(args.append_csv)
+            intraday_df["timestamps"] = pd.to_datetime(intraday_df["timestamps"])
+            print(f"Using intraday candles from {args.append_csv} at each walk-forward step (last {args.append_tail} per prior day)")
+
         print(f"Backtesting {pred_len} sessions, walk-forward from {lookback} candles of history ...")
-        pred_df = walk_forward_backtest(df, lookback, pred_len, predictor, args.temperature, args.top_p, args.sample_count)
+        pred_df = walk_forward_backtest(
+            df, lookback, pred_len, predictor, args.temperature, args.top_p, args.sample_count,
+            intraday_df=intraday_df, intraday_tail=args.append_tail,
+        )
 
         print("\nForecast:")
         print(pred_df)

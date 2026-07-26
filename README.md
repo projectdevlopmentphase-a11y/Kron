@@ -63,6 +63,30 @@ is a pure price-based model with no fundamentals/news input, so it can't
 anticipate a discrete earnings surprise before it happens — it can only
 adapt once the actual post-results prices are visible.
 
+`--append-csv`/`--append-tail` also work with `--backtest`: at every
+walk-forward step, the prior day's single daily bar is swapped out for that
+same day's last `--append-tail` intraday candles (matched by date):
+
+```shell
+python -m nse.forecast --csv data/NSE_HDFCBANK_day.csv --lookback 400 --pred-len 20 \
+    --backtest --append-csv data/NSE_HDFCBANK_60min_range.csv --append-tail 2 \
+    --event "2026-07-18:Q1 FY27 results" \
+    --output data/NSE_HDFCBANK_backtest_intraday.csv \
+    --chart-output data/NSE_HDFCBANK_backtest_intraday.png
+```
+
+On the HDFCBANK earnings-week window this made things *worse* (MAE 16.08 vs
+11.45 for the daily-only walk-forward, see
+`data/NSE_HDFCBANK_backtest_daily_vs_intraday.png`) — folding in 2 hours of
+intraday swings as the most recent context made the day-ahead forecast
+noisier rather than more accurate, most visibly on 2026-07-21 where it
+overshot the actual close by ~₹49. Kronos's context window is built from a
+single consistent candle interval; splicing a different (finer) granularity
+onto the end of a daily series appears to look like a change in volatility
+regime rather than "more information," so it doesn't reliably help a
+next-day daily forecast — at least not without more systematic testing than
+a single earnings week.
+
 ## Notes
 
 Model weights (`NeoQuasar/Kronos-small`, `NeoQuasar/Kronos-Tokenizer-base`) are
