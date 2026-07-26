@@ -64,6 +64,44 @@ def backtest_day(df: pd.DataFrame, target_date, lookback_days: int, predictor, T
     return context, actual, pred
 
 
+def backtest_day_walk_forward(df: pd.DataFrame, target_date, lookback_days: int, predictor, T, top_p, sample_count):
+    """Like backtest_day, but predicts the target day one bar at a time, feeding
+    each bar's *real* outcome back in as context before predicting the next bar
+    -- instead of generating the whole day in one shot from only the prior days'
+    context.
+    """
+    all_dates = trading_dates(df)
+    prior_dates = [d for d in all_dates if d < target_date][-lookback_days:]
+    if len(prior_dates) < lookback_days:
+        return None
+    prior_context = df[df["timestamps"].dt.normalize().isin(prior_dates)]
+    target_bars = df[df["timestamps"].dt.normalize() == target_date].reset_index(drop=True)
+    if target_bars.empty:
+        return None
+
+    preds = []
+    for i in range(len(target_bars)):
+        known_today = target_bars.iloc[:i]
+        context = pd.concat([prior_context, known_today], ignore_index=True)
+        y_timestamp = pd.Series([target_bars.iloc[i]["timestamps"]])
+        pred = predictor.predict(
+            df=context[PRICE_COLS],
+            x_timestamp=context["timestamps"],
+            y_timestamp=y_timestamp,
+            pred_len=1,
+            T=T,
+            top_p=top_p,
+            sample_count=sample_count,
+            verbose=False,
+        )
+        pred.index = y_timestamp.values
+        preds.append(pred)
+
+    pred_df = pd.concat(preds)
+    actual = target_bars.set_index("timestamps")[PRICE_COLS]
+    return prior_context, actual, pred_df
+
+
 def compute_metrics(actual, pred, column="close"):
     errors = pred[column].to_numpy() - actual[column].to_numpy()
     mae = abs(errors).mean()
@@ -72,7 +110,7 @@ def compute_metrics(actual, pred, column="close"):
     return {"MAE": mae, "RMSE": rmse, "MAPE_pct": mape}
 
 
-def plot_days(results, symbol, chart_output):
+def plot_days(results, symbol, chart_output, mode_label="single-shot"):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -97,7 +135,7 @@ def plot_days(results, symbol, chart_output):
     for j in range(n, rows * cols):
         axes[j // cols][j % cols].axis("off")
 
-    fig.suptitle(f"{symbol} — intraday (hourly) backtest, {n} days x {len(results[0][1])} bars/day", fontsize=12)
+    fig.suptitle(f"{symbol} — intraday (hourly) backtest, {n} days x {len(results[0][1])} bars/day ({mode_label})", fontsize=12)
     fig.tight_layout()
     fig.savefig(chart_output, dpi=150)
     plt.close(fig)
@@ -114,6 +152,13 @@ def main():
     parser.add_argument("--sample-count", type=int, default=1)
     parser.add_argument("--output", help="path to write the per-bar backtest comparison CSV to")
     parser.add_argument("--chart-output", help="path to write a per-day small-multiples PNG chart to")
+    parser.add_argument(
+        "--walk-forward",
+        action="store_true",
+        help="predict each day one hourly bar at a time, feeding that bar's real "
+        "outcome back in as context before predicting the next bar, instead of "
+        "generating the whole day in one shot from only the prior days' context",
+    )
     args = parser.parse_args()
 
     df = load_intraday(args.csv)
@@ -131,11 +176,13 @@ def main():
     model = Kronos.from_pretrained(MODEL_NAME)
     predictor = KronosPredictor(model, tokenizer, max_context=512)
 
-    print(f"Backtesting {len(target_dates)} trading days, each predicted from the {args.lookback_days} trading days before it ...")
+    day_fn = backtest_day_walk_forward if args.walk_forward else backtest_day
+    mode = "walk-forward (real bars fed back in)" if args.walk_forward else "single-shot (whole day at once)"
+    print(f"Backtesting {len(target_dates)} trading days, each predicted from the {args.lookback_days} trading days before it, {mode} ...")
     results = []
     all_comparisons = []
     for target_date in target_dates:
-        outcome = backtest_day(df, target_date, args.lookback_days, predictor, args.temperature, args.top_p, args.sample_count)
+        outcome = day_fn(df, target_date, args.lookback_days, predictor, args.temperature, args.top_p, args.sample_count)
         if outcome is None:
             continue
         context, actual, pred = outcome
@@ -168,7 +215,7 @@ def main():
         print(f"Wrote per-bar comparison to {args.output}")
 
     if args.chart_output:
-        plot_days(results, symbol, args.chart_output)
+        plot_days(results, symbol, args.chart_output, mode_label="walk-forward" if args.walk_forward else "single-shot")
         print(f"Wrote chart to {args.chart_output}")
 
 
