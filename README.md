@@ -12,6 +12,10 @@ open-source foundation model for financial candlesticks (K-lines).
 - `nse/intraday_backtest.py` — CLI that backtests Kronos on intraday (hourly)
   candles: predicts a whole trading day's hourly path from the N trading days
   before it, walk-forward across several days.
+- `nse/intraday_5min_close.py` — CLI that predicts a day's final close from
+  just that day's own first N hours of 5-minute candles (no cross-day context).
+- `nse/pnl_simulation.py` — turns an `intraday_backtest.py` output into a toy
+  long/short daily P&L simulation.
 - `data/` — sample data and forecast output.
 
 ## Setup
@@ -248,6 +252,33 @@ less room for a correct call to pay off before the day ends. Both results
 are fragile outcomes from 10 days on one symbol, not a validated edge — a
 slightly different window, or any real-world charge (brokerage, STT,
 slippage), would likely change the sign of either one.
+
+### 5-minute candles, same-day only
+
+`nse/intraday_5min_close.py` is a different, more minimal experiment: no
+cross-day context at all, no multi-day lookback -- just a trading day's own
+first `--hours` of 5-minute candles (12 bars/hour) fed in, predicting that
+same day's final close as a single value:
+
+```shell
+python -m nse.intraday_5min_close --csv data/NSE_HDFCBANK_5min_range.csv \
+    --hours 4 --before 2026-07-18 \
+    --output data/NSE_HDFCBANK_5min_close.csv \
+    --chart-output data/NSE_HDFCBANK_5min_close.png
+```
+
+Feeding just the first 4 hours (48 bars) of each of the same 10 pre-earnings
+days and predicting the 15:25 close gives **MAE 4.01, RMSE 6.41, MAPE
+0.49%** — see `data/NSE_HDFCBANK_5min_close.png`. The predicted close
+(purple dashed line) mostly hovers near wherever the first 4 hours left
+off, which works well on most days since intraday closes don't usually
+travel far from the late-morning level. The one outlier is 2026-07-08
+(error +18.56): the stock kept sliding through the afternoon after a flat
+morning, a continuation this same-day-only view had no way to anticipate
+(no prior-day trend context to lean on, unlike the hourly `--lookback-days`
+tests above). This is a much lighter-weight test than the multi-day hourly
+backtests — no long history required, just today's own morning session —
+and it holds up surprisingly well given how little it's given to work with.
 
 ### Live intraday use
 
