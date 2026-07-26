@@ -195,13 +195,32 @@ before it happens, but once given the day's actual starting point, it
 adapts to new real information quickly rather than compounding its own
 earlier miss.
 
+`--given-bars N` generalizes "give the first candle" to any number of a
+day's own opening candles — e.g. `--given-bars 3` feeds in 09:15-11:15 as
+known context and only predicts/scores 12:15 onward:
+
+```shell
+python -m nse.intraday_backtest --csv data/NSE_HDFCBANK_60min_range.csv \
+    --lookback-days 5 --num-days 10 --before 2026-07-18 --given-bars 3 \
+    --output data/NSE_HDFCBANK_intraday_backtest_g3.csv \
+    --chart-output data/NSE_HDFCBANK_intraday_backtest_g3.png
+```
+
+With 3 bars given, single-shot MAE improves to 4.63 and walk-forward to
+2.84 (both down from 5.82 / 3.02 with just 1 bar given) — unsurprising,
+since predicting only the last 4 hours of a day from 3 known real hours is
+an easier task than predicting 6 hours from 1. More given context generally
+makes the *remaining-bar* forecast easier, but it also means less of the
+day is left to actually trade on.
+
 ### P&L simulation (no charges)
 
 `nse/pnl_simulation.py` turns an `intraday_backtest.py` output CSV into a toy
 daily long/short strategy: ₹`--capital` fresh each day (no compounding
 across days, no brokerage/STT/slippage), direction decided from the model's
-forecast for that day's close made right after the real 09:15 candle, exit
-at the actual close:
+forecast for that day's close made right after the given opening bar(s),
+exit at the actual close. Entry price/time is read from the backtest CSV
+automatically, so it adapts to whatever `--given-bars` was used:
 
 ```shell
 python -m nse.pnl_simulation --intraday-csv data/NSE_HDFCBANK_60min_range.csv \
@@ -210,17 +229,25 @@ python -m nse.pnl_simulation --intraday-csv data/NSE_HDFCBANK_60min_range.csv \
     --chart-output data/NSE_HDFCBANK_pnl_simulation.png
 ```
 
-Over the same 10 pre-earnings days with ₹10,000 deployed each day: **net
-+₹97.42 total (+0.097% average per day), but only 3 of 10 days were
-winners** — see `data/NSE_HDFCBANK_pnl_simulation.png`. The model called
-SHORT on most days including several that actually rose (e.g. 2026-07-06,
--₹85), but two large correct SHORT calls on the two down days that followed
-(2026-07-07 +₹107, 2026-07-08 +₹255) covered the rest. This is a fragile
-result from 10 days on one symbol, not a validated edge — a slightly
-different window or a couple of real-world charges (brokerage, STT,
-slippage) would likely erase the ₹97 entirely. Directional single-shot
-forecasts made once at the open, scored only on hitting long/short
-correctly, are a much harder bar than the MAE numbers above suggest.
+Over the same 10 pre-earnings days with ₹10,000 deployed each day, entering
+right after the 09:15 open (1 bar given): **net +₹97.42 total (+0.097%
+average per day), but only 3 of 10 days were directionally correct** — see
+`data/NSE_HDFCBANK_pnl_simulation.png`. The model called SHORT on most days
+including several that actually rose (e.g. 2026-07-06, -₹85), but two large
+correct SHORT calls on the two down days that followed (2026-07-07 +₹107,
+2026-07-08 +₹255) covered the rest.
+
+Re-running the same strategy off the `--given-bars 3` backtest (entering at
+11:15 instead of 09:15, with 3 fewer hours left to capture any move) flips
+the result to **net -₹355.88**, still with only 3/10 days directionally
+correct — see `data/NSE_HDFCBANK_pnl_simulation_g3.png`. The lower MAE with
+more bars given doesn't translate into a better trading outcome, because
+MAE measures how close the *price level* forecast is, not whether the
+*direction* call was right — and with a smaller remaining window there's
+less room for a correct call to pay off before the day ends. Both results
+are fragile outcomes from 10 days on one symbol, not a validated edge — a
+slightly different window, or any real-world charge (brokerage, STT,
+slippage), would likely change the sign of either one.
 
 ### Live intraday use
 

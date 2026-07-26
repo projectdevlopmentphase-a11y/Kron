@@ -1,7 +1,10 @@
 """Simulate a simple daily long/short strategy on top of an intraday_backtest.py
 output CSV: ₹--capital fresh each day (no compounding, no charges/slippage/STT),
 direction decided from the model's forecast for that day's close made right after
-the real 09:15 candle, position held until the actual close.
+the given opening candle(s) (whatever --given-bars intraday_backtest.py was run
+with), position held until the actual close. Entry price is read as the real
+close of the bar immediately before the backtest CSV's first predicted bar for
+that day, so this automatically adapts to however many bars were given.
 
 Example:
   python -m nse.pnl_simulation --intraday-csv data/NSE_HDFCBANK_60min_range.csv \\
@@ -21,10 +24,12 @@ def simulate(intraday_csv: str, backtest_csv: str, capital: float) -> pd.DataFra
 
     rows = []
     for day, group in backtest.groupby(backtest.index.normalize()):
-        entry_bar = intraday[intraday["timestamps"] == day + pd.Timedelta(hours=9, minutes=15)]
+        first_predicted_ts = group.index.min()
+        entry_bar = intraday[(intraday["timestamps"].dt.normalize() == day) & (intraday["timestamps"] < first_predicted_ts)]
         if entry_bar.empty:
             continue
-        entry_price = entry_bar["close"].iloc[0]
+        entry_price = entry_bar["close"].iloc[-1]
+        entry_time = entry_bar["timestamps"].iloc[-1]
 
         predicted_final_close = group["predicted_close"].iloc[-1]
         actual_final_close = group["actual_close"].iloc[-1]
@@ -35,6 +40,7 @@ def simulate(intraday_csv: str, backtest_csv: str, capital: float) -> pd.DataFra
 
         rows.append({
             "date": day.date(),
+            "entry_time": entry_time.strftime("%H:%M"),
             "entry_price": entry_price,
             "predicted_close": predicted_final_close,
             "actual_close": actual_final_close,
@@ -68,7 +74,9 @@ def plot_pnl(result: pd.DataFrame, capital: float, chart_output: str):
     pad = max(20, result["pnl_rupees"].abs().max() * 0.2)
     ax1.set_ylim(result["pnl_rupees"].min() - pad, result["pnl_rupees"].max() + pad)
     ax1.set_ylabel("Daily P&L (₹)")
-    ax1.set_title("long/short decided from model's forecast right after the open, exit at actual close", fontsize=9.5)
+    entry_times = sorted(result["entry_time"].unique())
+    entry_desc = entry_times[0] if len(entry_times) == 1 else f"{entry_times[0]}-{entry_times[-1]}"
+    ax1.set_title(f"long/short decided from model's forecast right after {entry_desc}, exit at actual close", fontsize=9.5)
     ax1.grid(axis="y", alpha=0.3)
 
     fig.suptitle(f"simulated daily strategy, ₹{capital:,.0f} fresh each day, no charges", fontsize=13, y=0.99)

@@ -44,11 +44,12 @@ def trading_dates(df: pd.DataFrame):
     return sorted(df["timestamps"].dt.normalize().unique())
 
 
-def backtest_day(df: pd.DataFrame, target_date, lookback_days: int, predictor, T, top_p, sample_count):
+def backtest_day(df: pd.DataFrame, target_date, lookback_days: int, given_bars: int, predictor, T, top_p, sample_count):
     """Predict a day's hourly bars from prior_days' context PLUS that day's own
-    real first candle (fed in as known context, never predicted -- the opening
-    bar reflects the overnight/weekend gap, which no amount of prior-day history
-    can anticipate). Only the remaining bars are generated and scored.
+    first `given_bars` real candles (fed in as known context, never predicted --
+    the opening bars reflect the overnight/weekend gap and early-session moves,
+    which no amount of prior-day history can anticipate). Only the remaining
+    bars are generated and scored.
     """
     all_dates = trading_dates(df)
     prior_dates = [d for d in all_dates if d < target_date][-lookback_days:]
@@ -56,12 +57,12 @@ def backtest_day(df: pd.DataFrame, target_date, lookback_days: int, predictor, T
         return None
     prior_context = df[df["timestamps"].dt.normalize().isin(prior_dates)]
     target_bars = df[df["timestamps"].dt.normalize() == target_date].reset_index(drop=True)
-    if len(target_bars) < 2:
+    if len(target_bars) <= given_bars:
         return None
 
-    first_bar = target_bars.iloc[:1]
-    remaining_bars = target_bars.iloc[1:]
-    context = pd.concat([prior_context, first_bar], ignore_index=True)
+    given = target_bars.iloc[:given_bars]
+    remaining_bars = target_bars.iloc[given_bars:]
+    context = pd.concat([prior_context, given], ignore_index=True)
     pred_len = len(remaining_bars)
     y_timestamp = remaining_bars["timestamps"]
     pred = predictor.predict(
@@ -79,11 +80,11 @@ def backtest_day(df: pd.DataFrame, target_date, lookback_days: int, predictor, T
     return context, actual, pred
 
 
-def backtest_day_walk_forward(df: pd.DataFrame, target_date, lookback_days: int, predictor, T, top_p, sample_count):
+def backtest_day_walk_forward(df: pd.DataFrame, target_date, lookback_days: int, given_bars: int, predictor, T, top_p, sample_count):
     """Like backtest_day, but predicts the remaining bars one at a time, feeding
     each bar's *real* outcome back in as context before predicting the next bar
-    -- instead of generating them all in one shot. The day's real first candle
-    is fed in as context and never predicted, same as backtest_day.
+    -- instead of generating them all in one shot. The day's first `given_bars`
+    real candles are fed in as context and never predicted, same as backtest_day.
     """
     all_dates = trading_dates(df)
     prior_dates = [d for d in all_dates if d < target_date][-lookback_days:]
@@ -91,11 +92,11 @@ def backtest_day_walk_forward(df: pd.DataFrame, target_date, lookback_days: int,
         return None
     prior_context = df[df["timestamps"].dt.normalize().isin(prior_dates)]
     target_bars = df[df["timestamps"].dt.normalize() == target_date].reset_index(drop=True)
-    if len(target_bars) < 2:
+    if len(target_bars) <= given_bars:
         return None
 
     preds = []
-    for i in range(1, len(target_bars)):
+    for i in range(given_bars, len(target_bars)):
         known_today = target_bars.iloc[:i]
         context = pd.concat([prior_context, known_today], ignore_index=True)
         y_timestamp = pd.Series([target_bars.iloc[i]["timestamps"]])
@@ -113,8 +114,8 @@ def backtest_day_walk_forward(df: pd.DataFrame, target_date, lookback_days: int,
         preds.append(pred)
 
     pred_df = pd.concat(preds)
-    actual = target_bars.iloc[1:].set_index("timestamps")[PRICE_COLS]
-    context = pd.concat([prior_context, target_bars.iloc[:1]], ignore_index=True)
+    actual = target_bars.iloc[given_bars:].set_index("timestamps")[PRICE_COLS]
+    context = pd.concat([prior_context, target_bars.iloc[:given_bars]], ignore_index=True)
     return context, actual, pred_df
 
 
@@ -216,13 +217,14 @@ def plot_days(results, symbol, chart_output, mode_label="single-shot"):
 
     for i, (target_date, context, actual, pred, metrics) in enumerate(results):
         ax = axes[i // cols][i % cols]
-        open_bar = context.iloc[-1]
-        hours = [open_bar["timestamps"].strftime("%H:%M")] + [t.strftime("%H:%M") for t in actual.index]
-        actual_y = [open_bar["close"]] + list(actual["close"].values)
-        pred_y = [open_bar["close"]] + list(pred["close"].values)
+        given = context[context["timestamps"].dt.normalize() == target_date]
+        given_hours = [t.strftime("%H:%M") for t in given["timestamps"]]
+        hours = given_hours + [t.strftime("%H:%M") for t in actual.index]
+        actual_y = list(given["close"].values) + list(actual["close"].values)
+        pred_y = list(given["close"].values) + list(pred["close"].values)
         ax.plot(hours, actual_y, color="#2ca02c", marker="o", markersize=4, label="Actual")
         ax.plot(hours, pred_y, color="#9467bd", marker="^", markersize=4, linestyle="--", label="Predicted")
-        ax.plot(hours[0], actual_y[0], color="#1f77b4", marker="s", markersize=6, zorder=5, label="Given (1st candle)")
+        ax.plot(given_hours, given["close"].values, color="#1f77b4", marker="s", markersize=6, zorder=5, linestyle="None", label="Given")
         ax.set_title(f"{target_date.date()}\nMAE={metrics['MAE']:.2f}", fontsize=9)
         ax.tick_params(axis="x", labelrotation=45, labelsize=7)
         ax.tick_params(axis="y", labelsize=7)
@@ -232,7 +234,7 @@ def plot_days(results, symbol, chart_output, mode_label="single-shot"):
     for j in range(n, rows * cols):
         axes[j // cols][j % cols].axis("off")
 
-    fig.suptitle(f"{symbol} — intraday (hourly) backtest, {n} days ({mode_label}, 1st candle given)", fontsize=12)
+    fig.suptitle(f"{symbol} — intraday (hourly) backtest, {n} days ({mode_label}, {len(given_hours)} bar(s) given)", fontsize=12)
     fig.tight_layout()
     fig.savefig(chart_output, dpi=150)
     plt.close(fig)
@@ -243,6 +245,7 @@ def main():
     parser.add_argument("--csv", required=True, help="path to an intraday OHLCV CSV (e.g. 60minute candles)")
     parser.add_argument("--lookback-days", type=int, default=5, help="trading days of intraday history to use as context (default 5)")
     parser.add_argument("--num-days", type=int, default=10, help="number of trading days to walk-forward test (default 10)")
+    parser.add_argument("--given-bars", type=int, default=1, help="how many of each target day's own real opening candles to feed in as known context, never predicted or scored (default 1)")
     parser.add_argument("--before", help="only test trading days strictly before this date (YYYY-MM-DD), e.g. to stay clear of an earnings event")
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-p", type=float, default=0.9)
@@ -304,18 +307,18 @@ def main():
 
     day_fn = backtest_day_walk_forward if args.walk_forward else backtest_day
     mode = "walk-forward (real bars fed back in)" if args.walk_forward else "single-shot (whole day at once)"
-    print(f"Backtesting {len(target_dates)} trading days, each predicted from the {args.lookback_days} trading days before it, {mode} ...")
+    print(f"Backtesting {len(target_dates)} trading days, each predicted from the {args.lookback_days} trading days before it, {mode}, {args.given_bars} bar(s) given ...")
     results = []
     all_comparisons = []
     for target_date in target_dates:
-        outcome = day_fn(df, target_date, args.lookback_days, predictor, args.temperature, args.top_p, args.sample_count)
+        outcome = day_fn(df, target_date, args.lookback_days, args.given_bars, predictor, args.temperature, args.top_p, args.sample_count)
         if outcome is None:
             continue
         context, actual, pred = outcome
         metrics = compute_metrics(actual, pred, column="close")
         results.append((target_date, context, actual, pred, metrics))
         print(
-            f"  {target_date.date()}: {len(actual)} bars (+1 given), "
+            f"  {target_date.date()}: {len(actual)} bars (+{args.given_bars} given), "
             f"MAE={metrics['MAE']:.2f} RMSE={metrics['RMSE']:.2f} MAPE={metrics['MAPE_pct']:.2f}%"
         )
         comparison = pd.DataFrame({
