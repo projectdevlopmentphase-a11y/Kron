@@ -9,13 +9,19 @@ Two data sources are supported:
 By default the last `--lookback` candles are used as context and Kronos
 forecasts the `--pred-len` candles that come *after* them into the future
 (the "--future" mode, which is the default). Pass `--backtest` to instead
-hold out the most recent `--pred-len` known candles and compare the
-forecast against them.
+hold out the most recent `--pred-len` *known* candles, forecast them from
+the `--lookback` candles right before them, and score the forecast
+against what actually happened (MAE / RMSE / MAPE on close).
 
 Example (forecast the next 20 trading days for HDFCBANK from a local CSV):
   python -m nse.forecast --csv data/NSE_HDFCBANK_day.csv --lookback 400 \\
       --pred-len 20 --output data/NSE_HDFCBANK_forecast.csv \\
       --chart-output data/NSE_HDFCBANK_forecast.png
+
+Example (backtest against the most recent 20 known trading days):
+  python -m nse.forecast --csv data/NSE_HDFCBANK_day.csv --lookback 400 \\
+      --pred-len 20 --backtest --output data/NSE_HDFCBANK_backtest.csv \\
+      --chart-output data/NSE_HDFCBANK_backtest.png
 """
 import argparse
 import sys
@@ -77,6 +83,45 @@ def plot_forecast(history_df, pred_df, symbol, chart_output):
     plt.close(fig)
 
 
+def compute_metrics(actual_df, pred_df, column="close"):
+    actual = actual_df[column].to_numpy()
+    predicted = pred_df[column].to_numpy()
+    errors = predicted - actual
+    mae = abs(errors).mean()
+    rmse = (errors**2).mean() ** 0.5
+    mape = (abs(errors) / actual).mean() * 100
+    return {"MAE": mae, "RMSE": rmse, "MAPE_pct": mape}
+
+
+def plot_backtest(context_df, actual_df, pred_df, symbol, chart_output):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    context_tail = context_df.tail(60)
+    ax.plot(context_tail["timestamps"], context_tail["close"], label="Context (input)", color="#1f77b4")
+
+    actual_connector_x = [context_df["timestamps"].iloc[-1]] + list(actual_df["timestamps"])
+    actual_connector_y = [context_df["close"].iloc[-1]] + list(actual_df["close"])
+    ax.plot(actual_connector_x, actual_connector_y, label="Actual close", color="#2ca02c", marker="o", markersize=4)
+
+    pred_connector_x = [context_df["timestamps"].iloc[-1]] + list(pred_df.index)
+    pred_connector_y = [context_df["close"].iloc[-1]] + list(pred_df["close"])
+    ax.plot(pred_connector_x, pred_connector_y, label="Kronos forecast", color="#d62728", linestyle="--", marker="o", markersize=4)
+
+    ax.axvline(context_df["timestamps"].iloc[-1], color="gray", linestyle=":", linewidth=1)
+    ax.set_title(f"{symbol} — backtest: Kronos forecast vs actual close")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Price")
+    ax.legend()
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    fig.savefig(chart_output, dpi=150)
+    plt.close(fig)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--symbol", help="NSE tradingsymbol, e.g. HDFCBANK")
@@ -95,8 +140,9 @@ def main():
     parser.add_argument(
         "--backtest",
         action="store_true",
-        help="hold out the most recent pred-len known candles and compare against them, "
-        "instead of forecasting real future dates (the default)",
+        help="hold out the most recent pred-len known candles, forecast them from the "
+        "lookback candles before them, and score the forecast against what actually "
+        "happened, instead of forecasting real future dates (the default)",
     )
     args = parser.parse_args()
 
@@ -113,10 +159,12 @@ def main():
                 "Widen --from-date/--to-date or lower --lookback/--pred-len."
             )
         lookback, pred_len = args.lookback, args.pred_len
-        x_df = df.loc[: lookback - 1, ["open", "high", "low", "close", "volume", "amount"]]
-        x_timestamp = df.loc[: lookback - 1, "timestamps"]
-        y_timestamp = df.loc[lookback : lookback + pred_len - 1, "timestamps"]
-        history_df = df.loc[: lookback - 1]
+        window = df.tail(lookback + pred_len).reset_index(drop=True)
+        context_df = window.iloc[:lookback].reset_index(drop=True)
+        actual_df = window.iloc[lookback:].reset_index(drop=True)
+        x_df = context_df[["open", "high", "low", "close", "volume", "amount"]]
+        x_timestamp = context_df["timestamps"]
+        y_timestamp = actual_df["timestamps"]
     else:
         if len(df) < args.lookback:
             raise SystemExit(
@@ -152,13 +200,38 @@ def main():
     print("\nForecast:")
     print(pred_df)
 
-    if args.output:
-        pred_df.to_csv(args.output)
-        print(f"\nWrote forecast to {args.output}")
+    if args.backtest:
+        metrics = compute_metrics(actual_df, pred_df, column="close")
+        comparison = pd.DataFrame(
+            {
+                "actual_close": actual_df["close"].values,
+                "predicted_close": pred_df["close"].values,
+                "error": pred_df["close"].values - actual_df["close"].values,
+            },
+            index=y_timestamp.values,
+        )
+        print("\nActual vs predicted (close):")
+        print(comparison)
+        print(
+            f"\nClose-price accuracy over {pred_len} sessions: "
+            f"MAE={metrics['MAE']:.2f}  RMSE={metrics['RMSE']:.2f}  MAPE={metrics['MAPE_pct']:.2f}%"
+        )
 
-    if args.chart_output:
-        plot_forecast(history_df, pred_df, symbol, args.chart_output)
-        print(f"Wrote chart to {args.chart_output}")
+        if args.output:
+            comparison.to_csv(args.output)
+            print(f"\nWrote backtest comparison to {args.output}")
+
+        if args.chart_output:
+            plot_backtest(context_df, actual_df, pred_df, symbol, args.chart_output)
+            print(f"Wrote chart to {args.chart_output}")
+    else:
+        if args.output:
+            pred_df.to_csv(args.output)
+            print(f"\nWrote forecast to {args.output}")
+
+        if args.chart_output:
+            plot_forecast(history_df, pred_df, symbol, args.chart_output)
+            print(f"Wrote chart to {args.chart_output}")
 
 
 if __name__ == "__main__":
