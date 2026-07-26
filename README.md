@@ -9,6 +9,9 @@ open-source foundation model for financial candlesticks (K-lines).
 - `nse/kite_client.py` — pulls NSE equity OHLCV candles via Kite Connect (`kiteconnect`).
 - `nse/forecast.py` — CLI that loads `Kronos-small` + `Kronos-Tokenizer-base` from
   Hugging Face and forecasts future candles from historical ones.
+- `nse/intraday_backtest.py` — CLI that backtests Kronos on intraday (hourly)
+  candles: predicts a whole trading day's hourly path from the N trading days
+  before it, walk-forward across several days.
 - `data/` — sample data and forecast output.
 
 ## Setup
@@ -134,6 +137,32 @@ above actual). The lesson: lookback should span enough history to be
 informative, but not so much that it drags in a price regime the stock has
 since moved away from — more context only helps as long as it's still
 representative of current price level and volatility.
+
+## Intraday backtesting
+
+`nse/intraday_backtest.py` is a separate mode: instead of predicting a single
+end-of-day close, it predicts every hourly candle of a trading day at once
+(`pred_len` = however many bars that day has) from the `--lookback-days`
+trading days immediately before it, walked forward across `--num-days`
+trading days. Use `--before` to keep the whole test clear of a known event
+like an earnings release:
+
+```shell
+python -m nse.intraday_backtest --csv data/NSE_HDFCBANK_60min_range.csv \
+    --lookback-days 5 --num-days 10 --before 2026-07-18 \
+    --output data/NSE_HDFCBANK_intraday_backtest.csv \
+    --chart-output data/NSE_HDFCBANK_intraday_backtest.png
+```
+
+Backtesting the 10 trading days from 2026-07-06 to 2026-07-17 (all before the
+Q1 FY27 results, each predicted from the 5 trading days before it) gives
+**MAE 11.13, RMSE 14.03, MAPE 1.35%** across 70 hourly bars — see
+`data/NSE_HDFCBANK_intraday_backtest.png` for the per-day small multiples.
+Most days track closely (2026-07-10 MAE 1.44, 2026-07-15 MAE 4.03), with the
+worst day (2026-07-06, MAE 28.90) being a gap-up Monday the 5-day lookback
+had no way to anticipate. This is a calmer, non-earnings-week test than the
+daily backtests above, and the accuracy holds up well at hourly granularity
+too.
 
 ## Notes
 
