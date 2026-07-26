@@ -280,6 +280,25 @@ tests above). This is a much lighter-weight test than the multi-day hourly
 backtests — no long history required, just today's own morning session —
 and it holds up surprisingly well given how little it's given to work with.
 
+`pnl_simulation.py --close-csv` runs the same toy strategy directly off an
+`intraday_5min_close.py` output (self-contained, no separate raw-intraday
+lookup needed): go long/short based on whether the predicted close is above
+or below the price at the end of the given 4 hours (13:15), exit at the
+actual close, ₹10,000 fresh each day, no charges:
+
+```shell
+python -m nse.pnl_simulation --close-csv data/NSE_HDFCBANK_5min_close.csv \
+    --capital 10000 --output data/NSE_HDFCBANK_5min_pnl_simulation.csv \
+    --chart-output data/NSE_HDFCBANK_5min_pnl_simulation.png
+```
+
+Result: **net -₹299.60** over the 10 days, 3/10 days directionally correct
+— see `data/NSE_HDFCBANK_5min_pnl_simulation.png`. Same story as the hourly
+version: a low MAE (4.01) doesn't imply a good hit rate, and the single big
+miss (2026-07-08, predicted close ~828 vs actual 809.45) alone cost ₹218 of
+the ₹300 net loss — a reminder that a single bad day can dominate a small
+sample's P&L regardless of how accurate the model is on average.
+
 ### Live intraday use
 
 `--backtest`/`--walk-forward` only work retroactively — they need a target

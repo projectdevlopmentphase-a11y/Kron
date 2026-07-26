@@ -18,6 +18,20 @@ from pathlib import Path
 import pandas as pd
 
 
+def simulate_from_close_csv(close_csv: str, capital: float) -> pd.DataFrame:
+    """Same strategy, but reading directly from an intraday_5min_close.py output
+    CSV (columns: date, given_end_price, actual_close, predicted_close, error) --
+    no raw intraday CSV lookup needed since the entry price is already recorded.
+    """
+    df = pd.read_csv(close_csv, parse_dates=["date"])
+    df["direction"] = df.apply(lambda r: "LONG" if r["predicted_close"] > r["given_end_price"] else "SHORT", axis=1)
+    pct_move = (df["actual_close"] - df["given_end_price"]) / df["given_end_price"]
+    df["pnl_pct"] = pct_move.where(df["direction"] == "LONG", -pct_move) * 100
+    df["pnl_rupees"] = capital * df["pnl_pct"] / 100
+    df["capital_end_of_day"] = capital + df["pnl_rupees"]
+    return df.rename(columns={"given_end_price": "entry_price"})
+
+
 def simulate(intraday_csv: str, backtest_csv: str, capital: float) -> pd.DataFrame:
     intraday = pd.read_csv(intraday_csv, parse_dates=["timestamps"])
     backtest = pd.read_csv(backtest_csv, index_col=0, parse_dates=True)
@@ -74,9 +88,12 @@ def plot_pnl(result: pd.DataFrame, capital: float, chart_output: str):
     pad = max(20, result["pnl_rupees"].abs().max() * 0.2)
     ax1.set_ylim(result["pnl_rupees"].min() - pad, result["pnl_rupees"].max() + pad)
     ax1.set_ylabel("Daily P&L (₹)")
-    entry_times = sorted(result["entry_time"].unique())
-    entry_desc = entry_times[0] if len(entry_times) == 1 else f"{entry_times[0]}-{entry_times[-1]}"
-    ax1.set_title(f"long/short decided from model's forecast right after {entry_desc}, exit at actual close", fontsize=9.5)
+    if "entry_time" in result.columns:
+        entry_times = sorted(result["entry_time"].unique())
+        entry_desc = f"right after {entry_times[0]}" if len(entry_times) == 1 else f"right after {entry_times[0]}-{entry_times[-1]}"
+    else:
+        entry_desc = "once the given window ends"
+    ax1.set_title(f"long/short decided from model's forecast {entry_desc}, exit at actual close", fontsize=9.5)
     ax1.grid(axis="y", alpha=0.3)
 
     fig.suptitle(f"simulated daily strategy, ₹{capital:,.0f} fresh each day, no charges", fontsize=13, y=0.99)
@@ -96,14 +113,20 @@ def plot_pnl(result: pd.DataFrame, capital: float, chart_output: str):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--intraday-csv", required=True, help="path to the raw intraday OHLCV CSV")
-    parser.add_argument("--backtest-csv", required=True, help="path to an intraday_backtest.py --output CSV")
+    parser.add_argument("--intraday-csv", help="path to the raw intraday OHLCV CSV (use with --backtest-csv)")
+    parser.add_argument("--backtest-csv", help="path to an intraday_backtest.py --output CSV (use with --intraday-csv)")
+    parser.add_argument("--close-csv", help="path to an intraday_5min_close.py --output CSV instead (self-contained, no --intraday-csv needed)")
     parser.add_argument("--capital", type=float, default=10000, help="capital deployed fresh each day (default 10000)")
     parser.add_argument("--output", help="path to write the per-day P&L CSV to")
     parser.add_argument("--chart-output", help="path to write the P&L chart to")
     args = parser.parse_args()
 
-    result = simulate(args.intraday_csv, args.backtest_csv, args.capital)
+    if args.close_csv:
+        result = simulate_from_close_csv(args.close_csv, args.capital)
+    elif args.intraday_csv and args.backtest_csv:
+        result = simulate(args.intraday_csv, args.backtest_csv, args.capital)
+    else:
+        parser.error("either --close-csv, or both --intraday-csv and --backtest-csv, are required")
     print(result.to_string(index=False))
     print(f"\nTotal P&L over {len(result)} days (₹{args.capital:,.0f} fresh each day, no charges): ₹{result['pnl_rupees'].sum():.2f}")
     print(f"Winning days: {(result['pnl_rupees'] > 0).sum()} / {len(result)}")
