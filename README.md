@@ -14,6 +14,9 @@ open-source foundation model for financial candlesticks (K-lines).
   before it, walk-forward across several days.
 - `nse/intraday_5min_close.py` — CLI that predicts a day's final close from
   just that day's own first N hours of 5-minute candles (no cross-day context).
+- `nse/short_horizon_backtest.py` — CLI that rolls a small context window
+  through every trading day predicting a few minutes ahead each time, to
+  probe how little context Kronos can work with.
 - `nse/pnl_simulation.py` — turns an `intraday_backtest.py` output into a toy
   long/short daily P&L simulation.
 - `data/` — sample data and forecast output.
@@ -298,6 +301,39 @@ version: a low MAE (4.01) doesn't imply a good hit rate, and the single big
 miss (2026-07-08, predicted close ~828 vs actual 809.45) alone cost ₹218 of
 the ₹300 net loss — a reminder that a single bad day can dominate a small
 sample's P&L regardless of how accurate the model is on average.
+
+### How low can the context/horizon go?
+
+`nse/short_horizon_backtest.py` pushes this to the extreme: instead of one
+prediction per day, it slides a small context window through *every*
+trading day (same-day only, no cross-day history), predicting just a few
+minutes ahead each time, to get a real sample size instead of 10 data
+points:
+
+```shell
+python -m nse.short_horizon_backtest --csv data/NSE_HDFCBANK_5min_range.csv \
+    --context-hours 1 --horizon-minutes 10 --step-minutes 10 --before 2026-07-18 \
+    --output data/NSE_HDFCBANK_short_horizon.csv \
+    --chart-output data/NSE_HDFCBANK_short_horizon.png
+```
+
+| Context | Horizon | Windows | MAE | MAPE | Direction correct |
+|---|---|---|---|---|---|
+| 1 hour | 10 min | 310 | 0.98 | 0.12% | 51.9% |
+| 1 hour | 5 min | 630 | 0.72 | 0.09% | 51.4% |
+| 30 min | 10 min | 340 | 0.99 | 0.12% | 46.2% |
+
+Yes, you can feed in 1 hour and get a "reasonable" 10-minute prediction in
+the sense that the price-level error is tiny (MAE well under ₹1, MAPE
+~0.1%) — see `data/NSE_HDFCBANK_short_horizon.png` for the predicted-vs-actual
+scatter (tight around the diagonal) and error distribution (narrow, centered
+on zero). **But that low MAE is mostly a reflection of how small 10-minute
+moves naturally are, not genuine predictive skill** — direction accuracy
+across all three configs sits at 46-52%, indistinguishable from a coin
+flip, and shrinking the context from 1 hour to 30 minutes made direction
+accuracy *worse*, not better. So there's a floor here: below roughly an
+hour of context, Kronos still produces plausible-looking numbers, but they
+carry no more directional information than guessing.
 
 ### Live intraday use
 
