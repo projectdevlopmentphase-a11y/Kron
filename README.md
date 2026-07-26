@@ -371,6 +371,36 @@ edge. A genuinely independent signal (order flow, earnings surprise, news
 sentiment — none of which are price-derived) would be a more promising
 place to look than another instrument's price-only forecast.
 
+### Does the pattern hold on the Nifty 50?
+
+Ran the full pipeline on `NSE:NIFTY 50` (the broad index, `data/NSE_NIFTY50_day.csv`
++ `data/NIFTY50_5min_range.csv`) to check whether a broader, more diversified
+index behaves any differently from a single stock or sector:
+
+- **Daily forecast** (`data/NSE_NIFTY50_forecast.png`): same `forecast.py`
+  future mode, 400-day lookback, 20-day-ahead prediction — chart looks like
+  every other daily forecast in this repo, hovering near the last known level.
+- **Daily backtest**: MAPE 0.71% over the same 20-session pre-earnings-style
+  window — comparable to HDFCBANK's 1.44%, actually tighter (Nifty 50 is
+  smoother/less volatile than a single stock, as expected).
+- **Short-horizon rolling test** (2hr context → 10min ahead, 250 windows,
+  same as the HDFCBANK/Nifty Bank tests): MAE 15.87, MAPE 0.07%, **direction
+  correct 48.0%** — if anything slightly *below* coin-flip, well within
+  noise.
+
+| Instrument | Direction hit rate (10min ahead) | n |
+|---|---|---|
+| HDFCBANK (stock) | 52.0% | 250 |
+| Nifty Bank (sector index) | 50.8% | 250 |
+| Nifty 50 (broad index) | 48.0% | 250 |
+
+See `data/direction_accuracy_by_instrument.png` — all three sit on top of
+the 50% line within their confidence intervals, regardless of how broad or
+liquid the instrument is. Diversification smooths out price-level noise
+(hence the better MAPE), but it doesn't turn a coin flip into a directional
+edge — the same price-only-input ceiling applies whether it's one bank
+stock or the entire market.
+
 ### Live intraday use
 
 `--backtest`/`--walk-forward` only work retroactively — they need a target
