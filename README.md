@@ -195,6 +195,33 @@ before it happens, but once given the day's actual starting point, it
 adapts to new real information quickly rather than compounding its own
 earlier miss.
 
+### P&L simulation (no charges)
+
+`nse/pnl_simulation.py` turns an `intraday_backtest.py` output CSV into a toy
+daily long/short strategy: ₹`--capital` fresh each day (no compounding
+across days, no brokerage/STT/slippage), direction decided from the model's
+forecast for that day's close made right after the real 09:15 candle, exit
+at the actual close:
+
+```shell
+python -m nse.pnl_simulation --intraday-csv data/NSE_HDFCBANK_60min_range.csv \
+    --backtest-csv data/NSE_HDFCBANK_intraday_backtest.csv --capital 10000 \
+    --output data/NSE_HDFCBANK_pnl_simulation.csv \
+    --chart-output data/NSE_HDFCBANK_pnl_simulation.png
+```
+
+Over the same 10 pre-earnings days with ₹10,000 deployed each day: **net
++₹97.42 total (+0.097% average per day), but only 3 of 10 days were
+winners** — see `data/NSE_HDFCBANK_pnl_simulation.png`. The model called
+SHORT on most days including several that actually rose (e.g. 2026-07-06,
+-₹85), but two large correct SHORT calls on the two down days that followed
+(2026-07-07 +₹107, 2026-07-08 +₹255) covered the rest. This is a fragile
+result from 10 days on one symbol, not a validated edge — a slightly
+different window or a couple of real-world charges (brokerage, STT,
+slippage) would likely erase the ₹97 entirely. Directional single-shot
+forecasts made once at the open, scored only on hitting long/short
+correctly, are a much harder bar than the MAE numbers above suggest.
+
 ### Live intraday use
 
 `--backtest`/`--walk-forward` only work retroactively — they need a target
