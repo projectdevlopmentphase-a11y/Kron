@@ -322,18 +322,26 @@ python -m nse.short_horizon_backtest --csv data/NSE_HDFCBANK_5min_range.csv \
 | 1 hour | 10 min | 310 | 0.98 | 0.12% | 51.9% |
 | 1 hour | 5 min | 630 | 0.72 | 0.09% | 51.4% |
 | 30 min | 10 min | 340 | 0.99 | 0.12% | 46.2% |
+| 2 hours | 10 min | 250 | 0.97 | 0.12% | 52.0% |
 
-Yes, you can feed in 1 hour and get a "reasonable" 10-minute prediction in
+Yes, you can feed in 1-2 hours and get a "reasonable" 10-minute prediction in
 the sense that the price-level error is tiny (MAE well under ₹1, MAPE
 ~0.1%) — see `data/NSE_HDFCBANK_short_horizon.png` for the predicted-vs-actual
 scatter (tight around the diagonal) and error distribution (narrow, centered
 on zero). **But that low MAE is mostly a reflection of how small 10-minute
 moves naturally are, not genuine predictive skill** — direction accuracy
-across all three configs sits at 46-52%, indistinguishable from a coin
-flip, and shrinking the context from 1 hour to 30 minutes made direction
-accuracy *worse*, not better. So there's a floor here: below roughly an
+across all four configs sits at 46-52%, indistinguishable from a coin
+flip. Doubling context from 1 hour to 2 hours (`--context-hours 2
+--horizon-minutes 10 --step-minutes 10`, 250 windows) didn't move the
+needle at all (52.0%, statistically the same as 1 hour's 51.9%) — see
+`data/NSE_HDFCBANK_2hr_10min_rolling.png`. A single fixed morning window per
+day (09:15-11:15 context → predict the 11:25 close, `--step-minutes 999` to
+get exactly one window/day) happened to score 60% direction correct, but
+that's only 10 samples — noise, not a real result; the 250-window rolling
+version is the one to trust. So there's a floor here: below roughly an
 hour of context, Kronos still produces plausible-looking numbers, but they
-carry no more directional information than guessing.
+carry no more directional information than guessing, and adding more
+context beyond an hour doesn't buy back any directional edge either.
 
 ### Live intraday use
 
