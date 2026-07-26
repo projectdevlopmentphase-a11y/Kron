@@ -214,6 +214,19 @@ def main():
         help="mark a real-world event (e.g. an earnings date) on the chart as "
         "YYYY-MM-DD:label; repeatable",
     )
+    parser.add_argument(
+        "--append-csv",
+        help="only with --future: path to a finer-grained OHLCV CSV (e.g. intraday "
+        "60minute candles) whose most recent --append-tail rows are appended after "
+        "the daily lookback tail, as the most recent context, before forecasting",
+    )
+    parser.add_argument(
+        "--append-tail",
+        type=int,
+        default=2,
+        help="how many most-recent rows of --append-csv to append (default 2, e.g. "
+        "the last 2 hours of 60minute candles)",
+    )
     args = parser.parse_args()
     events = parse_events(args.event)
 
@@ -281,12 +294,27 @@ def main():
             plot_backtest(context_df, actual_df, pred_df, symbol, args.chart_output, events=events)
             print(f"Wrote chart to {args.chart_output}")
     else:
-        tail = df.tail(lookback).reset_index(drop=True)
+        history_for_plot = df
+        if args.append_csv:
+            extra = pd.read_csv(args.append_csv)
+            extra["timestamps"] = pd.to_datetime(extra["timestamps"])
+            extra = extra.tail(args.append_tail).reset_index(drop=True)
+            tail = df.tail(lookback - len(extra)).reset_index(drop=True)
+            tail = pd.concat([tail, extra], ignore_index=True)
+            history_for_plot = pd.concat([df, extra], ignore_index=True)
+            print(
+                f"Appended {len(extra)} rows from {args.append_csv} "
+                f"({extra['timestamps'].iloc[0]} .. {extra['timestamps'].iloc[-1]}) "
+                "as the most recent context"
+            )
+        else:
+            tail = df.tail(lookback).reset_index(drop=True)
+
         x_df = tail[PRICE_COLS]
         x_timestamp = tail["timestamps"]
         y_timestamp = future_business_days(tail["timestamps"].iloc[-1], pred_len)
 
-        print(f"Forecasting {pred_len} future candles from {lookback} candles of history ...")
+        print(f"Forecasting {pred_len} future candles from {len(tail)} candles of history ...")
         pred_df = predictor.predict(
             df=x_df,
             x_timestamp=x_timestamp,
@@ -307,7 +335,7 @@ def main():
             print(f"\nWrote forecast to {args.output}")
 
         if args.chart_output:
-            plot_forecast(df, pred_df, symbol, args.chart_output, events=events)
+            plot_forecast(history_for_plot, pred_df, symbol, args.chart_output, events=events)
             print(f"Wrote chart to {args.chart_output}")
 
 
