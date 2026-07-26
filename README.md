@@ -343,6 +343,34 @@ hour of context, Kronos still produces plausible-looking numbers, but they
 carry no more directional information than guessing, and adding more
 context beyond an hour doesn't buy back any directional edge either.
 
+### Cross-asset confirmation filter
+
+Kronos can't take non-price signals as input directly (it's a pretrained
+model with a fixed OHLCV+amount schema), but you can run it separately on a
+*related* instrument and use that as a confirming filter. Ran the same
+2hr-context/10min-horizon rolling test (`short_horizon_backtest.py`) on the
+`NSE:NIFTY BANK` index over the identical window, then only counted HDFC
+Bank's directional call as "taken" when the index's own Kronos-predicted
+direction agreed with it:
+
+| Subset | HDFC direction hit rate | n |
+|---|---|---|
+| Baseline (all windows) | 52.0% | 250 |
+| Nifty Bank agrees | 53.4% | 148 |
+| Nifty Bank disagrees | 50.0% | 102 |
+
+See `data/HDFCBANK_NIFTYBANK_confirmation_filter.png` — the 95% confidence
+intervals on all three bars overlap heavily with each other and with the
+50% coin-flip line, so the apparent 53.4%-vs-52.0% lift isn't statistically
+distinguishable from noise at this sample size. Unsurprising in hindsight:
+HDFC Bank is a large constituent of the index, so the two already move
+together most of the time (59% agreement rate here) — but since Nifty
+Bank's own Kronos forecast is *also* only at 50.8% direction accuracy on
+its own, requiring agreement between two coin flips doesn't manufacture an
+edge. A genuinely independent signal (order flow, earnings surprise, news
+sentiment — none of which are price-derived) would be a more promising
+place to look than another instrument's price-only forecast.
+
 ### Live intraday use
 
 `--backtest`/`--walk-forward` only work retroactively — they need a target
