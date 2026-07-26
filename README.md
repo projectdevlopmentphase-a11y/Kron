@@ -80,12 +80,39 @@ On the HDFCBANK earnings-week window this made things *worse* (MAE 16.08 vs
 `data/NSE_HDFCBANK_backtest_daily_vs_intraday.png`) — folding in 2 hours of
 intraday swings as the most recent context made the day-ahead forecast
 noisier rather than more accurate, most visibly on 2026-07-21 where it
-overshot the actual close by ~₹49. Kronos's context window is built from a
-single consistent candle interval; splicing a different (finer) granularity
-onto the end of a daily series appears to look like a change in volatility
-regime rather than "more information," so it doesn't reliably help a
-next-day daily forecast — at least not without more systematic testing than
-a single earnings week.
+overshot the actual close by ~₹49. Splicing a couple of hours of a
+different, finer granularity onto the end of an otherwise-daily series
+seems to read to Kronos as a volatility-regime change rather than "more
+information."
+
+`--intraday-only` goes further: it drops the daily lookback entirely and
+builds the *whole* context for every walk-forward step from
+`--intraday-lookback` intraday candles (default 400, ~57 trading days),
+instead of mixing granularities:
+
+```shell
+python -m nse.forecast --csv data/NSE_HDFCBANK_day.csv --lookback 400 --pred-len 20 \
+    --backtest --append-csv data/NSE_HDFCBANK_60min_range.csv \
+    --intraday-only --intraday-lookback 400 \
+    --event "2026-07-18:Q1 FY27 results" \
+    --output data/NSE_HDFCBANK_backtest_intraday_only.csv \
+    --chart-output data/NSE_HDFCBANK_backtest_intraday_only.png
+```
+
+This is the best of the three (see `data/NSE_HDFCBANK_backtest_three_way.png`):
+
+| Context | MAE | RMSE | MAPE |
+|---|---|---|---|
+| Daily-only walk-forward | 11.45 | 14.88 | 1.44% |
+| Daily + last 2hrs intraday spliced on | 16.08 | 19.82 | 2.02% |
+| Full 400-bar intraday context (no daily mixing) | **8.79** | **12.22** | **1.10%** |
+
+So mixing granularities hurt, but going all-in on a *consistent* intraday
+granularity for the whole context helped — including tracking the
+earnings-week drop noticeably better than the daily-only version. This is
+still one earnings week on one symbol, not a validated result, but it
+suggests Kronos wants a single consistent candle interval throughout its
+context rather than a blend.
 
 ## Notes
 

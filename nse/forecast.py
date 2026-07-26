@@ -155,6 +155,38 @@ def walk_forward_backtest(df, lookback, pred_len, predictor, T, top_p, sample_co
     return pd.concat(rows)
 
 
+def walk_forward_backtest_intraday_only(daily_df, intraday_df, lookback, pred_len, predictor, T, top_p, sample_count):
+    """Like walk_forward_backtest, but the context for every step is built entirely
+    from intraday candles (the last `lookback` intraday bars strictly before the
+    target day), instead of daily bars with only the tail replaced by intraday data.
+    """
+    n = len(daily_df)
+    start = n - pred_len
+    rows = []
+    for i in range(pred_len):
+        idx = start + i
+        target_timestamp = daily_df.iloc[idx]["timestamps"]
+        context = intraday_df[intraday_df["timestamps"] < target_timestamp.normalize()].tail(lookback)
+        y_timestamp = pd.Series([target_timestamp])
+        pred = predictor.predict(
+            df=context[PRICE_COLS],
+            x_timestamp=context["timestamps"],
+            y_timestamp=y_timestamp,
+            pred_len=1,
+            T=T,
+            top_p=top_p,
+            sample_count=sample_count,
+            verbose=False,
+        )
+        pred.index = y_timestamp.values
+        rows.append(pred)
+        print(
+            f"  {target_timestamp.date()}: predicted close={pred['close'].iloc[0]:.2f} "
+            f"(from {len(context)} intraday bars, {context['timestamps'].iloc[0]} .. {context['timestamps'].iloc[-1]})"
+        )
+    return pd.concat(rows)
+
+
 def compute_metrics(actual_df, pred_df, column="close"):
     actual = actual_df[column].to_numpy()
     predicted = pred_df[column].to_numpy()
@@ -240,6 +272,21 @@ def main():
         help="how many most-recent rows of --append-csv to append (default 2, e.g. "
         "the last 2 hours of 60minute candles)",
     )
+    parser.add_argument(
+        "--intraday-only",
+        action="store_true",
+        help="only with --backtest --append-csv: build the ENTIRE context for every "
+        "walk-forward step from --append-csv's intraday candles (the last "
+        "--intraday-lookback bars strictly before the target day), instead of daily "
+        "bars with just the tail replaced",
+    )
+    parser.add_argument(
+        "--intraday-lookback",
+        type=int,
+        default=400,
+        help="number of intraday candles to use as context in --intraday-only mode "
+        "(default 400)",
+    )
     args = parser.parse_args()
     events = parse_events(args.event)
 
@@ -271,13 +318,26 @@ def main():
         if args.append_csv:
             intraday_df = pd.read_csv(args.append_csv)
             intraday_df["timestamps"] = pd.to_datetime(intraday_df["timestamps"])
-            print(f"Using intraday candles from {args.append_csv} at each walk-forward step (last {args.append_tail} per prior day)")
 
-        print(f"Backtesting {pred_len} sessions, walk-forward from {lookback} candles of history ...")
-        pred_df = walk_forward_backtest(
-            df, lookback, pred_len, predictor, args.temperature, args.top_p, args.sample_count,
-            intraday_df=intraday_df, intraday_tail=args.append_tail,
-        )
+        if args.intraday_only:
+            if intraday_df is None:
+                parser.error("--intraday-only requires --append-csv")
+            print(
+                f"Backtesting {pred_len} sessions, walk-forward using only the last "
+                f"{args.intraday_lookback} intraday candles as context each step ..."
+            )
+            pred_df = walk_forward_backtest_intraday_only(
+                df, intraday_df, args.intraday_lookback, pred_len, predictor,
+                args.temperature, args.top_p, args.sample_count,
+            )
+        else:
+            if intraday_df is not None:
+                print(f"Using intraday candles from {args.append_csv} at each walk-forward step (last {args.append_tail} per prior day)")
+            print(f"Backtesting {pred_len} sessions, walk-forward from {lookback} candles of history ...")
+            pred_df = walk_forward_backtest(
+                df, lookback, pred_len, predictor, args.temperature, args.top_p, args.sample_count,
+                intraday_df=intraday_df, intraday_tail=args.append_tail,
+            )
 
         print("\nForecast:")
         print(pred_df)
