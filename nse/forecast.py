@@ -6,9 +6,16 @@ Two data sources are supported:
   --symbol <tradingsymbol>  pull live daily candles from Kite Connect
                              (requires KITE_API_KEY / KITE_ACCESS_TOKEN)
 
-Example:
-  python -m nse.forecast --symbol HDFCBANK --from 2023-01-01 --to 2026-07-24 \
-      --lookback 400 --pred-len 20
+By default the last `--lookback` candles are used as context and Kronos
+forecasts the `--pred-len` candles that come *after* them into the future
+(the "--future" mode, which is the default). Pass `--backtest` to instead
+hold out the most recent `--pred-len` known candles and compare the
+forecast against them.
+
+Example (forecast the next 20 trading days for HDFCBANK from a local CSV):
+  python -m nse.forecast --csv data/NSE_HDFCBANK_day.csv --lookback 400 \\
+      --pred-len 20 --output data/NSE_HDFCBANK_forecast.csv \\
+      --chart-output data/NSE_HDFCBANK_forecast.png
 """
 import argparse
 import sys
@@ -41,8 +48,37 @@ def load_dataframe(args) -> pd.DataFrame:
     )
 
 
+def future_business_days(last_timestamp: pd.Timestamp, pred_len: int) -> pd.Series:
+    dates = pd.bdate_range(start=last_timestamp, periods=pred_len + 1, freq="B")[1:]
+    return pd.Series(dates)
+
+
+def plot_forecast(history_df, pred_df, symbol, chart_output):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.plot(history_df["timestamps"], history_df["close"], label="Historical close", color="#1f77b4")
+
+    connector_x = [history_df["timestamps"].iloc[-1]] + list(pred_df.index)
+    connector_y = [history_df["close"].iloc[-1]] + list(pred_df["close"])
+    ax.plot(connector_x, connector_y, label="Kronos forecast", color="#d62728", linestyle="--", marker="o", markersize=3)
+
+    ax.axvline(history_df["timestamps"].iloc[-1], color="gray", linestyle=":", linewidth=1)
+    ax.set_title(f"{symbol} — close price, historical vs Kronos forecast")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Price")
+    ax.legend()
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    fig.savefig(chart_output, dpi=150)
+    plt.close(fig)
+
+
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--symbol", help="NSE tradingsymbol, e.g. HDFCBANK")
     parser.add_argument("--exchange", default="NSE")
     parser.add_argument("--interval", default="day")
@@ -55,31 +91,52 @@ def main():
     parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument("--sample-count", type=int, default=1)
     parser.add_argument("--output", help="path to write the forecast CSV to")
+    parser.add_argument("--chart-output", help="path to write a historical-vs-forecast PNG chart to")
+    parser.add_argument(
+        "--backtest",
+        action="store_true",
+        help="hold out the most recent pred-len known candles and compare against them, "
+        "instead of forecasting real future dates (the default)",
+    )
     args = parser.parse_args()
 
     if not args.csv and not args.symbol:
         parser.error("either --csv or --symbol is required")
 
     df = load_dataframe(args)
-    if len(df) < args.lookback + args.pred_len:
-        raise SystemExit(
-            f"Need at least {args.lookback + args.pred_len} candles, got {len(df)}. "
-            "Widen --from-date/--to-date or lower --lookback/--pred-len."
-        )
+    symbol = args.symbol or Path(args.csv).stem
 
-    lookback = args.lookback
-    pred_len = args.pred_len
-
-    x_df = df.loc[: lookback - 1, ["open", "high", "low", "close", "volume", "amount"]]
-    x_timestamp = df.loc[: lookback - 1, "timestamps"]
-    y_timestamp = df.loc[lookback : lookback + pred_len - 1, "timestamps"]
+    if args.backtest:
+        if len(df) < args.lookback + args.pred_len:
+            raise SystemExit(
+                f"Need at least {args.lookback + args.pred_len} candles for --backtest, got {len(df)}. "
+                "Widen --from-date/--to-date or lower --lookback/--pred-len."
+            )
+        lookback, pred_len = args.lookback, args.pred_len
+        x_df = df.loc[: lookback - 1, ["open", "high", "low", "close", "volume", "amount"]]
+        x_timestamp = df.loc[: lookback - 1, "timestamps"]
+        y_timestamp = df.loc[lookback : lookback + pred_len - 1, "timestamps"]
+        history_df = df.loc[: lookback - 1]
+    else:
+        if len(df) < args.lookback:
+            raise SystemExit(
+                f"Need at least {args.lookback} candles of history, got {len(df)}. "
+                "Widen --from-date/--to-date or lower --lookback."
+            )
+        lookback, pred_len = args.lookback, args.pred_len
+        tail = df.tail(lookback).reset_index(drop=True)
+        x_df = tail[["open", "high", "low", "close", "volume", "amount"]]
+        x_timestamp = tail["timestamps"]
+        y_timestamp = future_business_days(tail["timestamps"].iloc[-1], pred_len)
+        history_df = df
 
     print(f"Loading {MODEL_NAME} / {TOKENIZER_NAME} ...")
     tokenizer = KronosTokenizer.from_pretrained(TOKENIZER_NAME)
     model = Kronos.from_pretrained(MODEL_NAME)
     predictor = KronosPredictor(model, tokenizer, max_context=512)
 
-    print(f"Forecasting {pred_len} candles from {lookback} candles of history ...")
+    mode = "backtest" if args.backtest else "future"
+    print(f"Forecasting {pred_len} {mode} candles from {lookback} candles of history ...")
     pred_df = predictor.predict(
         df=x_df,
         x_timestamp=x_timestamp,
@@ -98,6 +155,10 @@ def main():
     if args.output:
         pred_df.to_csv(args.output)
         print(f"\nWrote forecast to {args.output}")
+
+    if args.chart_output:
+        plot_forecast(history_df, pred_df, symbol, args.chart_output)
+        print(f"Wrote chart to {args.chart_output}")
 
 
 if __name__ == "__main__":

@@ -6,3 +6,4 @@ huggingface_hub==0.33.1
 safetensors==0.6.2
 tqdm==4.67.1
 kiteconnect>=5.0.1
+matplotlib>=3.7.0
