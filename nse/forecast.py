@@ -8,19 +8,25 @@ Two data sources are supported:
 
 By default the last `--lookback` candles are used as context and Kronos
 forecasts the `--pred-len` candles that come *after* them into the future
-(the "--future" mode, which is the default). Pass `--backtest` to instead
-hold out the most recent `--pred-len` *known* candles, forecast them from
-the `--lookback` candles right before them, and score the forecast
-against what actually happened (MAE / RMSE / MAPE on close).
+(the "--future" mode, which is the default).
+
+Pass `--backtest` to instead hold out the most recent `--pred-len` *known*
+candles and score Kronos against what actually happened: it re-forecasts
+one day at a time, feeding each day's real outcome back in as context
+before predicting the next day (a "re-run every morning with last night's
+real close" walk-forward simulation), and reports MAE / RMSE / MAPE on
+close.
 
 Example (forecast the next 20 trading days for HDFCBANK from a local CSV):
   python -m nse.forecast --csv data/NSE_HDFCBANK_day.csv --lookback 400 \\
       --pred-len 20 --output data/NSE_HDFCBANK_forecast.csv \\
       --chart-output data/NSE_HDFCBANK_forecast.png
 
-Example (backtest against the most recent 20 known trading days):
+Example (backtest against the most recent 20 known trading days, marking
+HDFC Bank's Q1 FY27 results on the chart):
   python -m nse.forecast --csv data/NSE_HDFCBANK_day.csv --lookback 400 \\
-      --pred-len 20 --backtest --output data/NSE_HDFCBANK_backtest.csv \\
+      --pred-len 20 --backtest --event "2026-07-18:Q1 FY27 results" \\
+      --output data/NSE_HDFCBANK_backtest.csv \\
       --chart-output data/NSE_HDFCBANK_backtest.png
 """
 import argparse
@@ -34,6 +40,7 @@ from kronos.model import Kronos, KronosPredictor, KronosTokenizer  # noqa: E402
 
 TOKENIZER_NAME = "NeoQuasar/Kronos-Tokenizer-base"
 MODEL_NAME = "NeoQuasar/Kronos-small"
+PRICE_COLS = ["open", "high", "low", "close", "volume", "amount"]
 
 
 def load_dataframe(args) -> pd.DataFrame:
@@ -112,12 +119,10 @@ def plot_forecast(history_df, pred_df, symbol, chart_output, events=None):
 def walk_forward_backtest(df, lookback, pred_len, predictor, T, top_p, sample_count):
     """Re-forecast one day at a time, feeding each day's *actual* outcome back in
     as context before predicting the next day (a realistic "re-run every morning
-    with last night's real close" simulation), instead of one static multi-day
-    forecast made from a single stale context window.
+    with last night's real close" simulation).
     """
     n = len(df)
     start = n - pred_len
-    price_cols = ["open", "high", "low", "close", "volume", "amount"]
     rows = []
     for i in range(pred_len):
         idx = start + i
@@ -125,7 +130,7 @@ def walk_forward_backtest(df, lookback, pred_len, predictor, T, top_p, sample_co
         target_timestamp = df.iloc[idx]["timestamps"]
         y_timestamp = pd.Series([target_timestamp])
         pred = predictor.predict(
-            df=context[price_cols],
+            df=context[PRICE_COLS],
             x_timestamp=context["timestamps"],
             y_timestamp=y_timestamp,
             pred_len=1,
@@ -136,7 +141,7 @@ def walk_forward_backtest(df, lookback, pred_len, predictor, T, top_p, sample_co
         )
         pred.index = y_timestamp.values
         rows.append(pred)
-        print(f"  walk-forward {target_timestamp.date()}: predicted close={pred['close'].iloc[0]:.2f}")
+        print(f"  {target_timestamp.date()}: predicted close={pred['close'].iloc[0]:.2f}")
     return pd.concat(rows)
 
 
@@ -150,7 +155,7 @@ def compute_metrics(actual_df, pred_df, column="close"):
     return {"MAE": mae, "RMSE": rmse, "MAPE_pct": mape}
 
 
-def plot_backtest(context_df, actual_df, pred_df, symbol, chart_output, events=None, walk_forward_df=None):
+def plot_backtest(context_df, actual_df, pred_df, symbol, chart_output, events=None):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -166,12 +171,7 @@ def plot_backtest(context_df, actual_df, pred_df, symbol, chart_output, events=N
 
     pred_connector_x = [context_df["timestamps"].iloc[-1]] + list(pred_df.index)
     pred_connector_y = [context_df["close"].iloc[-1]] + list(pred_df["close"])
-    ax.plot(pred_connector_x, pred_connector_y, label="Static forecast (stale context)" if walk_forward_df is not None else "Kronos forecast", color="#d62728", linestyle="--", marker="o", markersize=4)
-
-    if walk_forward_df is not None:
-        wf_connector_x = [context_df["timestamps"].iloc[-1]] + list(walk_forward_df.index)
-        wf_connector_y = [context_df["close"].iloc[-1]] + list(walk_forward_df["close"])
-        ax.plot(wf_connector_x, wf_connector_y, label="Walk-forward forecast (fed actuals daily)", color="#ff7f0e", linestyle="--", marker="s", markersize=4)
+    ax.plot(pred_connector_x, pred_connector_y, label="Kronos forecast (walk-forward)", color="#d62728", linestyle="--", marker="o", markersize=4)
 
     ax.axvline(context_df["timestamps"].iloc[-1], color="gray", linestyle=":", linewidth=1)
     if events:
@@ -204,22 +204,15 @@ def main():
     parser.add_argument(
         "--backtest",
         action="store_true",
-        help="hold out the most recent pred-len known candles, forecast them from the "
-        "lookback candles before them, and score the forecast against what actually "
-        "happened, instead of forecasting real future dates (the default)",
+        help="hold out the most recent pred-len known candles and walk-forward score "
+        "Kronos against what actually happened, instead of forecasting real future "
+        "dates (the default)",
     )
     parser.add_argument(
         "--event",
         action="append",
         help="mark a real-world event (e.g. an earnings date) on the chart as "
         "YYYY-MM-DD:label; repeatable",
-    )
-    parser.add_argument(
-        "--walk-forward",
-        action="store_true",
-        help="only with --backtest: also re-forecast one day at a time, feeding each "
-        "day's actual outcome back in as context before predicting the next day, "
-        "and compare against the static multi-day forecast",
     )
     args = parser.parse_args()
     events = parse_events(args.event)
@@ -229,56 +222,31 @@ def main():
 
     df = load_dataframe(args)
     symbol = args.symbol or Path(args.csv).stem
+    lookback, pred_len = args.lookback, args.pred_len
 
-    if args.backtest:
-        if len(df) < args.lookback + args.pred_len:
-            raise SystemExit(
-                f"Need at least {args.lookback + args.pred_len} candles for --backtest, got {len(df)}. "
-                "Widen --from-date/--to-date or lower --lookback/--pred-len."
-            )
-        lookback, pred_len = args.lookback, args.pred_len
-        window = df.tail(lookback + pred_len).reset_index(drop=True)
-        context_df = window.iloc[:lookback].reset_index(drop=True)
-        actual_df = window.iloc[lookback:].reset_index(drop=True)
-        x_df = context_df[["open", "high", "low", "close", "volume", "amount"]]
-        x_timestamp = context_df["timestamps"]
-        y_timestamp = actual_df["timestamps"]
-    else:
-        if len(df) < args.lookback:
-            raise SystemExit(
-                f"Need at least {args.lookback} candles of history, got {len(df)}. "
-                "Widen --from-date/--to-date or lower --lookback."
-            )
-        lookback, pred_len = args.lookback, args.pred_len
-        tail = df.tail(lookback).reset_index(drop=True)
-        x_df = tail[["open", "high", "low", "close", "volume", "amount"]]
-        x_timestamp = tail["timestamps"]
-        y_timestamp = future_business_days(tail["timestamps"].iloc[-1], pred_len)
-        history_df = df
+    if len(df) < lookback + (pred_len if args.backtest else 0):
+        raise SystemExit(
+            f"Need at least {lookback + (pred_len if args.backtest else 0)} candles, got {len(df)}. "
+            "Widen --from-date/--to-date or lower --lookback/--pred-len."
+        )
 
     print(f"Loading {MODEL_NAME} / {TOKENIZER_NAME} ...")
     tokenizer = KronosTokenizer.from_pretrained(TOKENIZER_NAME)
     model = Kronos.from_pretrained(MODEL_NAME)
     predictor = KronosPredictor(model, tokenizer, max_context=512)
 
-    mode = "backtest" if args.backtest else "future"
-    print(f"Forecasting {pred_len} {mode} candles from {lookback} candles of history ...")
-    pred_df = predictor.predict(
-        df=x_df,
-        x_timestamp=x_timestamp,
-        y_timestamp=y_timestamp,
-        pred_len=pred_len,
-        T=args.temperature,
-        top_p=args.top_p,
-        sample_count=args.sample_count,
-        verbose=True,
-    )
-    pred_df.index = y_timestamp.values
-
-    print("\nForecast:")
-    print(pred_df)
-
     if args.backtest:
+        window = df.tail(lookback + pred_len).reset_index(drop=True)
+        context_df = window.iloc[:lookback].reset_index(drop=True)
+        actual_df = window.iloc[lookback:].reset_index(drop=True)
+        y_timestamp = actual_df["timestamps"]
+
+        print(f"Backtesting {pred_len} sessions, walk-forward from {lookback} candles of history ...")
+        pred_df = walk_forward_backtest(df, lookback, pred_len, predictor, args.temperature, args.top_p, args.sample_count)
+
+        print("\nForecast:")
+        print(pred_df)
+
         metrics = compute_metrics(actual_df, pred_df, column="close")
         comparison = pd.DataFrame(
             {
@@ -305,46 +273,41 @@ def main():
                     f"MAE after={after['error'].abs().mean():.2f} ({len(after)} sessions)"
                 )
 
-        walk_forward_df = None
-        if args.walk_forward:
-            print(f"\nWalk-forward: re-forecasting {pred_len} days one at a time, feeding real actuals back in each step ...")
-            walk_forward_df = walk_forward_backtest(
-                df, lookback, pred_len, predictor, args.temperature, args.top_p, args.sample_count
-            )
-            wf_metrics = compute_metrics(actual_df, walk_forward_df, column="close")
-            comparison["walk_forward_close"] = walk_forward_df["close"].values
-            comparison["walk_forward_error"] = walk_forward_df["close"].values - actual_df["close"].values
-            print("\nActual vs static vs walk-forward (close):")
-            print(comparison)
-            print(
-                f"\nWalk-forward close-price accuracy over {pred_len} sessions: "
-                f"MAE={wf_metrics['MAE']:.2f}  RMSE={wf_metrics['RMSE']:.2f}  MAPE={wf_metrics['MAPE_pct']:.2f}%"
-                f"  (static was MAE={metrics['MAE']:.2f})"
-            )
-            for event_date, label in events:
-                before = comparison[comparison.index < event_date]
-                after = comparison[comparison.index >= event_date]
-                if len(before) and len(after):
-                    print(
-                        f"Walk-forward around event '{label}' ({event_date.date()}): "
-                        f"MAE before={before['walk_forward_error'].abs().mean():.2f}, "
-                        f"MAE after={after['walk_forward_error'].abs().mean():.2f}"
-                    )
-
         if args.output:
             comparison.to_csv(args.output)
             print(f"\nWrote backtest comparison to {args.output}")
 
         if args.chart_output:
-            plot_backtest(context_df, actual_df, pred_df, symbol, args.chart_output, events=events, walk_forward_df=walk_forward_df)
+            plot_backtest(context_df, actual_df, pred_df, symbol, args.chart_output, events=events)
             print(f"Wrote chart to {args.chart_output}")
     else:
+        tail = df.tail(lookback).reset_index(drop=True)
+        x_df = tail[PRICE_COLS]
+        x_timestamp = tail["timestamps"]
+        y_timestamp = future_business_days(tail["timestamps"].iloc[-1], pred_len)
+
+        print(f"Forecasting {pred_len} future candles from {lookback} candles of history ...")
+        pred_df = predictor.predict(
+            df=x_df,
+            x_timestamp=x_timestamp,
+            y_timestamp=y_timestamp,
+            pred_len=pred_len,
+            T=args.temperature,
+            top_p=args.top_p,
+            sample_count=args.sample_count,
+            verbose=True,
+        )
+        pred_df.index = y_timestamp.values
+
+        print("\nForecast:")
+        print(pred_df)
+
         if args.output:
             pred_df.to_csv(args.output)
             print(f"\nWrote forecast to {args.output}")
 
         if args.chart_output:
-            plot_forecast(history_df, pred_df, symbol, args.chart_output, events=events)
+            plot_forecast(df, pred_df, symbol, args.chart_output, events=events)
             print(f"Wrote chart to {args.chart_output}")
 
 
