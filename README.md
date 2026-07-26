@@ -141,11 +141,10 @@ representative of current price level and volatility.
 ## Intraday backtesting
 
 `nse/intraday_backtest.py` is a separate mode: instead of predicting a single
-end-of-day close, it predicts every hourly candle of a trading day at once
-(`pred_len` = however many bars that day has) from the `--lookback-days`
-trading days immediately before it, walked forward across `--num-days`
-trading days. Use `--before` to keep the whole test clear of a known event
-like an earnings release:
+end-of-day close, it predicts a trading day's hourly candles from the
+`--lookback-days` trading days immediately before it, walked forward across
+`--num-days` trading days. Use `--before` to keep the whole test clear of a
+known event like an earnings release:
 
 ```shell
 python -m nse.intraday_backtest --csv data/NSE_HDFCBANK_60min_range.csv \
@@ -154,24 +153,30 @@ python -m nse.intraday_backtest --csv data/NSE_HDFCBANK_60min_range.csv \
     --chart-output data/NSE_HDFCBANK_intraday_backtest.png
 ```
 
-Backtesting the 10 trading days from 2026-07-06 to 2026-07-17 (all before the
-Q1 FY27 results, each predicted from the 5 trading days before it) gives
-**MAE 11.13, RMSE 14.03, MAPE 1.35%** across 70 hourly bars in this default
-"single-shot" mode — see `data/NSE_HDFCBANK_intraday_backtest.png` for the
-per-day small multiples. Most days track closely (2026-07-10 MAE 1.44,
-2026-07-15 MAE 4.03), with the worst day (2026-07-06, MAE 28.90) being a
-gap-up Monday: HDFCBANK rallied from Friday's ~₹801 close to open around
-₹805 and race to ₹821-830 within the first hour, something the 5 prior
-(calm, ₹795-805-range) trading days gave no hint of.
+Each day's own real **first candle (09:15) is always fed in as known context
+and never predicted or scored** — it reflects the overnight/weekend gap,
+which no amount of prior-day history can anticipate, so scoring it would
+only measure something structurally unknowable. Only the remaining bars
+(10:15 → 15:15, 6 of them) are generated.
 
-Single-shot mode generates all 7 hours of a day from one `predict()` call —
-Kronos's own autoregressive generation chains hour 1's *guess* into hour 2,
-hour 3, etc., but it never sees that day's *real* bars as they land, so once
-the first guess misses a surprise like a gap-up, every later hour just keeps
-extrapolating the same wrong guess instead of correcting to reality.
-`--walk-forward` fixes exactly that: it predicts one bar at a time, feeding
-each bar's real outcome back in as context before predicting the next one
-(like `forecast.py`'s daily `--backtest`, but within the day):
+Backtesting the 10 trading days from 2026-07-06 to 2026-07-17 (all before the
+Q1 FY27 results, each predicted from the 5 trading days before it, plus that
+day's own real open) gives **MAE 5.82, RMSE 7.28, MAPE 0.71%** across 60
+hourly bars in this default "single-shot" mode — see
+`data/NSE_HDFCBANK_intraday_backtest.png` for the per-day small multiples
+(blue square marks the given first candle). The worst day is still
+2026-07-06 (MAE 8.47), a gap-up Monday: HDFCBANK opened around ₹821 (already
+given) and kept climbing to ₹828-830, a continuation the 5 calm prior days
+gave no hint of.
+
+Single-shot mode generates all 6 remaining hours from one `predict()` call —
+Kronos's own autoregressive generation chains hour 2's *guess* into hour 3,
+hour 4, etc., but it never sees that day's *real* bars as they land, so once
+a guess drifts off, later hours just keep extrapolating instead of
+correcting to reality. `--walk-forward` fixes exactly that: it predicts one
+bar at a time, feeding each bar's real outcome back in as context before
+predicting the next one (like `forecast.py`'s daily `--backtest`, but within
+the day, and still starting from that day's given real open):
 
 ```shell
 python -m nse.intraday_backtest --csv data/NSE_HDFCBANK_60min_range.csv \
@@ -180,15 +185,15 @@ python -m nse.intraday_backtest --csv data/NSE_HDFCBANK_60min_range.csv \
     --chart-output data/NSE_HDFCBANK_intraday_backtest_wf.png
 ```
 
-This drops overall MAE from 11.13 to **3.32** (RMSE 4.93, MAPE 0.40%) across
-the same 70 bars. The gap-up day improves from MAE 28.90 to 6.31 — see
-`data/NSE_HDFCBANK_intraday_0706_before_after.png`: the 09:15 bar still
-misses (nothing before market open could know about the gap), but the
-moment the real 09:15 close is fed back in, the 10:15 prediction jumps from
-~₹798 to ~₹815 and tracks closely for the rest of the day. The lesson mirrors
-the daily case: Kronos can't predict a surprise before it happens, but it
-adapts to new real information almost immediately once it's given that
-information, rather than compounding its own earlier miss.
+This drops overall MAE from 5.82 to **3.02** (RMSE 4.14, MAPE 0.37%) across
+the same 60 bars, and the gap-up day from 8.47 to 5.31 — see
+`data/NSE_HDFCBANK_intraday_0706_before_after.png`: single-shot (red) stays
+too low most of the day, while walk-forward (purple) climbs back toward
+actual as each real hour gets fed back in, closing the gap almost entirely
+by 15:15. The lesson mirrors the daily case: Kronos can't predict a surprise
+before it happens, but once given the day's actual starting point, it
+adapts to new real information quickly rather than compounding its own
+earlier miss.
 
 ### Live intraday use
 
